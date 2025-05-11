@@ -23,7 +23,6 @@ import (
 	"net/http"
 	"sync"
 	"time"
-	// "rxtls/internal/core" // No longer needed
 )
 
 // Define needed constants locally for the client
@@ -31,7 +30,7 @@ const (
 	DialTimeout         = 5 * time.Second
 	KeepAliveTimeout    = 60 * time.Second
 	RequestTimeout      = 15 * time.Second
-	MaxIdleConnsPerHost = 100 // Default value
+	MaxIdleConnsPerHost = 150 // Default value
 )
 
 var (
@@ -40,7 +39,7 @@ var (
 	defaultKeepAliveTimeout = 60 * time.Second
 	defaultIdleConnTimeout  = 90 * time.Second
 	defaultMaxIdleConns     = 100
-	defaultMaxConnsPerHost  = 10
+	defaultMaxConnsPerHost  = 100
 	defaultRequestTimeout   = 15 * time.Second
 
 	// Shared client instance with mutex for config updates
@@ -126,7 +125,7 @@ func ConfigureTurboMode() {
 		KeepAliveTimeout: 120 * time.Second,
 		IdleConnTimeout:  120 * time.Second,
 		MaxIdleConns:     500,
-		MaxConnsPerHost:  50,
+		MaxConnsPerHost:  200,
 		RequestTimeout:   30 * time.Second,
 	}
 	ConfigureHTTPClient(turboConfig)

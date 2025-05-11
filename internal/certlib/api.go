@@ -28,9 +28,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"log"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -105,19 +105,75 @@ func GetCTLogs() ([]CTLogInfo, error) {
 		return nil, fmt.Errorf("error reading CT log list body: %w", err)
 	}
 
-	var ctlResponse CTLResponse
-	if err := json.Unmarshal(body, &ctlResponse); err != nil {
-		return nil, fmt.Errorf("error parsing CT logs list JSON: %w", err)
+	// Try to parse as V3 format first (same as in loadLocalCTLogs)
+	var v3Response struct {
+		Operators []struct {
+			Name string `json:"name"`
+			Logs []struct {
+				Description string                 `json:"description"`
+				URL         string                 `json:"url"`
+				State       map[string]interface{} `json:"state"`
+			} `json:"logs"`
+		} `json:"operators"`
 	}
 
-	// Process response (uses old format)
-	return processOldFormat(&ctlResponse)
+	if err := json.Unmarshal(body, &v3Response); err == nil {
+		// Process V3 format
+		var ctlogs []CTLogInfo
+		for _, operator := range v3Response.Operators {
+			for _, logEntry := range operator.Logs {
+				if logEntry.URL == "" {
+					continue
+				}
+				url := cleanLogURL(logEntry.URL)
+				if isLogUsable(logEntry.State) {
+					ctlogs = append(ctlogs, CTLogInfo{
+						URL:         url,
+						Description: logEntry.Description,
+						OperatedBy:  operator.Name,
+						BlockSize:   64, // Default
+					})
+				}
+			}
+		}
+		log.Printf("Found %d usable CT logs from remote (V3 format)", len(ctlogs))
+		return ctlogs, nil
+	}
+
+	// Fallback to V2/older format
+	log.Printf("Failed to parse remote logs as V3, trying older format")
+	var ctlResponse CTLResponse
+	if errFallback := json.Unmarshal(body, &ctlResponse); errFallback != nil {
+		// Save the response to a file for debugging
+		debugFile := "debug_ct_logs_response.json"
+		if err := os.WriteFile(debugFile, body, 0644); err == nil {
+			log.Printf("Saved problematic response to %s for debugging", debugFile)
+		}
+		return nil, fmt.Errorf("error parsing CT logs list JSON with known formats: %w", errFallback)
+	}
+
+	// Process response using old format
+	logs, err := processOldFormat(&ctlResponse)
+	if err != nil {
+		return nil, fmt.Errorf("error processing old format logs: %w", err)
+	}
+
+	// If we got logs successfully, save them to the local file for future use
+	if len(logs) > 0 {
+		if err := os.WriteFile(LocalLogsFile, body, 0644); err != nil {
+			log.Printf("Warning: Failed to save logs to local file: %v", err)
+		} else {
+			log.Printf("Saved logs to %s for future use", LocalLogsFile)
+		}
+	}
+
+	return logs, nil
 }
 
 // loadLocalCTLogs reads and parses the log list from a local JSON file.
 // Operation: Disk I/O bound, allocates for file read and JSON parsing.
 func loadLocalCTLogs(filename string) ([]CTLogInfo, error) {
-	data, err := ioutil.ReadFile(filename)
+	data, err := os.ReadFile(filename)
 	if err != nil {
 		return nil, fmt.Errorf("error reading local logs file: %w", err)
 	}
@@ -217,6 +273,11 @@ func processOldFormat(ctlResponse *CTLResponse) ([]CTLogInfo, error) {
 		}
 	}
 	log.Printf("Found %d usable CT logs in local file (Fallback format)", len(ctlogs))
+
+	if len(ctlogs) == 0 {
+		return nil, fmt.Errorf("no usable CT logs found in fallback format")
+	}
+
 	return ctlogs, nil
 }
 
@@ -233,7 +294,7 @@ func GetLogInfo(ctlog *CTLogInfo) error {
 	var resp *http.Response
 	var err error
 	maxRetries := 3
-	retryDelay := 500 * time.Millisecond
+	retryDelay := 100 * time.Millisecond
 
 	for attempt := 0; attempt < maxRetries; attempt++ {
 		resp, err = httpClient.Get(url)
