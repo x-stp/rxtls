@@ -1,66 +1,186 @@
-# rxtls - High-Throughput CT Log Processor
+# rxtls - High-Performance Certificate Transparency Processor
 
-`rxtls` is a Go-based tool designed for maximum performance when downloading and processing Certificate Transparency (CT) log entries. It prioritizes raw throughput, low-level optimizations, and efficient resource utilization over idiomatic Go or portability.
-
-**This version is optimized for Linux environments due to CPU affinity features.**
+rxtls is a high-throughput, fault-tolerant Certificate Transparency log processor designed for hyperscale environments. It provides efficient processing of CT logs with dynamic backpressure handling, adaptive rate limiting, and comprehensive observability.
 
 ## Features
 
-*   **High Concurrency:** Utilizes a worker pool affined to CPU cores (Linux only) for parallel processing.
-*   **Memory Efficiency:** Employs `sync.Pool` for reusing work items and buffers to minimize GC pressure.
-*   **Efficient Hashing:** Uses `xxh3` for fast non-cryptographic hashing.
-*   **Robust Parsing:** Handles standard CT log entry framing and common certificate types (X.509, Precert TBS).
-*   **Buffered I/O:** Uses buffered writers for efficient disk output.
-*   **Command-Line Interface:** Structured commands via Cobra.
-*   **Observability:** Optional periodic metrics display and pprof profiling support.
+- **High Throughput**: Process CT logs efficiently with a worker pool architecture
+- **Fault Tolerance**: Automatic retries, backpressure handling, and graceful shutdown
+- **Dynamic Rate Limiting**: Adaptive rate control based on success/failure patterns
+- **Observability**: Prometheus metrics for monitoring and alerting
+- **Configurable**: CLI flags for customizing behavior and CT log sources
+- **Versatile**: Download raw certificates or extract domains from CT logs
 
-## Commands
+## Architecture
 
-*   `list`: Lists available CT logs (fetches from Google's list or local file).
-    ```bash
-    go run ./cmd/rxtls/main.go list [--local-logs]
-    ```
-*   `domains`: Extracts domain information (CN, SANs) from selected logs into per-log CSV files.
-    ```bash
-    # Select logs interactively
-    go run ./cmd/rxtls/main.go domains -o output/domains [--metrics] [--compress] [--profile]
-    ```
-    Output Format: `offset,cn,primary_domain,all_domains,country,state,locality,org,issuer_cn,domain_org_hash`
-*   `download`: Downloads raw certificate entries (leaf_input, extra_data) from selected logs into per-log CSV files.
-    ```bash
-    # Select logs interactively
-    go run ./cmd/rxtls/main.go download -o output/certs [--metrics] [--compress] [--profile]
-    ```
-    Output Format: `offset,leaf_input_b64,extra_data_b64`
+The system consists of several key components:
 
-## Global Flags
+### Scheduler
+- Manages a pool of workers
+- Distributes work using least-loaded worker selection
+- Implements graceful shutdown
+- Provides statistics and metrics
 
-*   `--local-logs`: Use `./all_logs_list.json` instead of fetching the list from Google. (Default: `true`)
-*   `--profile`: Enable CPU and memory profiling. Writes `.prof` files to `/tmp/`. (Default: `false`)
-*   `--metrics`: Display periodic performance metrics to stderr. (Default: `false`)
+### Workers
+- Process work items from their queues
+- Implement backpressure handling
+- Track success/failure metrics
+- Support CPU affinity for optimal performance
 
-## Command-Specific Flags (`domains`, `download`)
+### Rate Limiter
+- Dynamic rate adjustment based on success/failure
+- Token bucket implementation for smooth rate limiting
+- Backpressure integration
+- Atomic operations for thread safety
 
-*   `-o, --output <dir>`: Specify the output directory. Defaults differ per command (`output/domains` or `output/certs`).
-*   `-c, --concurrency <int>`: Hint for concurrency level (e.g., number of parallel log setups or workers). `0` for auto. (Default: `0`)
-*   `-b, --buffer <int>`: Internal buffer size for disk I/O in bytes. (Default: `262144`)
-*   `--compress`: Compress output CSV files using gzip. (Default: `false`)
-*   `--turbo`: (Domains only) Enable experimental high-speed mode optimizations. (NOT IMPLEMENTED) (Default: `false`)
+### Metrics
+- Prometheus integration for monitoring
+- Queue pressure tracking
+- Success/failure rate monitoring
+- Resource utilization metrics
 
-## Building
+## Usage
+
+The tool provides several subcommands:
 
 ```bash
-go build -o rxtls ./cmd/rxtls/main.go
+# List available CT logs
+rxtls list
+
+# Download certificates from CT logs
+rxtls download
+
+# Extract domains from certificates in CT logs
+rxtls domains
+
+# Fetch and save the CT logs list to a local file
+rxtls fetch-logs
+
+# Direct processing with URI (legacy mode)
+rxtls --ct-uri https://ct.example.com/log
 ```
 
-## Known Limitations / Future Work
+### Global Flags
 
-*   **ASN.1 Parsing:** Still relies on standard `encoding/asn1` and `crypto/x509` which can fail on non-standard log entry variations. A more robust, potentially manual DER parser would improve compatibility.
-*   **Network Optimization:** Currently uses standard `net/http` client per request. Needs replacement with a shared, tuned `http.Transport` (HTTP/2, keep-alives, pooling, socket options).
-*   **io_uring:** Linux `io_uring` support for zero-copy networking is not implemented.
-*   **Hashing:** DomainOrgHash still allocates for `fmt.Sprintf`. `xxh3` library used, but pre-computation or different key structure could reduce allocs.
-*   **JSON Marshalling:** `ToDomainsCSVLine` uses `encoding/json` which allocates. Could be replaced with manual formatting or `strings.Builder`.
-*   **Error Handling/Retries:** Retry logic in callbacks is basic.
-*   **Scheduler Wait:** Mechanism for waiting for full scheduler completion could be more explicit.
-*   **Turbo Mode:** Features like DNS pre-warming are not implemented.
-*   **Logging:** Uses standard `log`. Should migrate to `zerolog` or `slog` for performance.
+```bash
+# Use local logs list instead of fetching from internet
+rxtls --local-logs [command]
+
+# Customize worker pool size
+rxtls --workers 8
+
+# Set initial rate limit
+rxtls --rate-limit 1000
+
+# Enable debug logging
+rxtls --debug
+
+# Configure Prometheus metrics port
+rxtls --metrics-port 9090
+```
+
+### Download Command
+
+```bash
+# Basic download with interactive log selection
+rxtls download
+
+# Specify output directory
+rxtls download --output /path/to/output
+
+# Configure concurrency
+rxtls download --concurrency 10
+
+# Adjust buffer size
+rxtls download --buffer 262144
+
+# Enable compression
+rxtls download --compress
+
+# Enable high-speed mode
+rxtls download --turbo
+```
+
+### Domains Command
+
+```bash
+# Basic domain extraction with interactive log selection
+rxtls domains
+
+# Specify output directory
+rxtls domains --output /path/to/domains
+
+# Configure concurrency
+rxtls domains --concurrency 10
+
+# Adjust buffer size
+rxtls domains --buffer 32768
+
+# Enable compression
+rxtls domains --compress
+
+# Enable high-speed mode
+rxtls domains --turbo
+```
+
+## Configuration
+
+### CLI Flags
+
+- `--ct-uri`: CT log URI to process (default: from config)
+- `--workers`: Number of worker goroutines (default: runtime.NumCPU())
+- `--rate-limit`: Initial rate limit in requests/second (default: 100)
+- `--debug`: Enable debug logging
+- `--metrics-port`: Prometheus metrics port (default: 9090)
+- `--local-logs`: Use local logs list instead of fetching from internet
+
+### Environment Variables
+
+- `RXTLS_CONFIG`: Path to config file
+- `RXTLS_LOG_LEVEL`: Log level (debug, info, warn, error)
+- `RXTLS_METRICS_PORT`: Prometheus metrics port
+
+## Metrics
+
+The following Prometheus metrics are exposed:
+
+- `rxtls_worker_queue_size`: Current size of worker queues
+- `rxtls_worker_queue_pressure`: Queue pressure (0-1)
+- `rxtls_worker_processed_total`: Total processed items
+- `rxtls_worker_errors_total`: Total errors
+- `rxtls_rate_limit_current`: Current rate limit
+- `rxtls_rate_limit_success_total`: Total successful requests
+- `rxtls_rate_limit_failure_total`: Total failed requests
+
+## Development
+
+### Prerequisites
+
+- Go 1.21 or later
+- Make (optional, for build scripts)
+
+### Building
+
+```bash
+# Build binary
+go build
+
+# Run tests
+go test ./...
+
+# Run benchmarks
+go test -bench=. ./...
+```
+
+### Testing
+
+The codebase includes comprehensive tests:
+
+- Unit tests for all components
+- Integration tests for the full pipeline
+- Benchmarks for performance testing
+- Race condition detection enabled
+
+## License
+
+GNU Affero General Public License v3 - see LICENSE file for details

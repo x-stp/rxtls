@@ -31,6 +31,7 @@ import (
 	"runtime"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/x-stp/rxtls/internal/certlib"
 
@@ -38,23 +39,11 @@ import (
 	"golang.org/x/time/rate"
 )
 
-// WorkItem definition MUST be identical across builds.
-// Pooled via sync.Pool.
-type WorkItem struct {
-	LogURL   string
-	LogInfo  *certlib.CTLogInfo
-	Start    int64
-	End      int64
-	Attempt  int
-	Callback func(item *WorkItem) error
-	Ctx      context.Context
-}
-
 // Scheduler definition MUST be identical across builds.
 // Manages workers and dispatch, but without affinity.
 type Scheduler struct {
 	numWorkers   int
-	workers      []*worker
+	workers      []*Worker
 	ctx          context.Context
 	cancel       context.CancelFunc
 	shutdown     atomic.Bool
@@ -62,14 +51,23 @@ type Scheduler struct {
 	activeWork   sync.WaitGroup // Tracks active work
 }
 
-// worker definition MUST be identical, cpuAffinity field is present but unused.
-type worker struct {
+// Worker definition MUST be identical, cpuAffinity field is present but unused.
+type Worker struct {
+	// Immutable fields
 	id          int
-	cpuAffinity int // Unused on non-Linux
-	queue       chan *WorkItem
-	scheduler   *Scheduler
 	ctx         context.Context
-	limiter     *rate.Limiter // Rate limiter for this worker
+	cancel      context.CancelFunc
+	scheduler   *Scheduler
+	queue       chan *WorkItem
+	limiter     *rate.Limiter
+	cpuAffinity int
+
+	// Metrics
+	processed  atomic.Int64
+	errors     atomic.Int64
+	panics     atomic.Int64
+	busy       atomic.Bool
+	lastActive atomic.Int64
 }
 
 // NewScheduler creates and starts the scheduler (stub version without affinity).
@@ -84,12 +82,14 @@ func NewScheduler(parentCtx context.Context) (*Scheduler, error) {
 
 	s := &Scheduler{
 		numWorkers: numWorkers,
-		workers:    make([]*worker, numWorkers),
+		workers:    make([]*Worker, numWorkers),
 		ctx:        sctx,
 		cancel:     cancel,
 		workItemPool: sync.Pool{
 			New: func() interface{} {
-				return &WorkItem{}
+				return &WorkItem{
+					CreatedAt: time.Now(),
+				}
 			},
 		},
 	}
@@ -98,7 +98,7 @@ func NewScheduler(parentCtx context.Context) (*Scheduler, error) {
 	burstSize := MaxShardQueueSize
 
 	for i := 0; i < numWorkers; i++ {
-		w := &worker{
+		w := &Worker{
 			id:          i,
 			cpuAffinity: -1, // Mark as unused
 			queue:       make(chan *WorkItem, MaxShardQueueSize),
@@ -116,7 +116,7 @@ func NewScheduler(parentCtx context.Context) (*Scheduler, error) {
 
 // run is the main loop for a worker goroutine (stub version without affinity setup).
 // Hot Path: Yes. Must be zero-GC, non-blocking (except on queue read).
-func (w *worker) run() {
+func (w *Worker) run() {
 	// No LockOSThread or affinity setting needed/possible on non-Linux.
 	for {
 		select {
@@ -150,6 +150,7 @@ func (w *worker) run() {
 			item.LogURL = ""
 			item.LogInfo = nil
 			item.Ctx = nil
+			item.Error = nil
 			w.scheduler.workItemPool.Put(item)
 		}
 	}
@@ -162,7 +163,7 @@ func setAffinity(workerID, cpuID int) {
 
 // SubmitWork definition MUST be identical across builds.
 // Hot Path: Yes. Non-blocking, low allocation.
-func (s *Scheduler) SubmitWork(ctx context.Context, logInfo *certlib.CTLogInfo, start, end int64, callback func(item *WorkItem) error) error {
+func (s *Scheduler) SubmitWork(ctx context.Context, logInfo *certlib.CTLogInfo, start, end int64, callback WorkCallback) error {
 	if s.shutdown.Load() {
 		return fmt.Errorf("scheduler is shutting down")
 	}
@@ -181,6 +182,7 @@ func (s *Scheduler) SubmitWork(ctx context.Context, logInfo *certlib.CTLogInfo, 
 	item.Attempt = 0
 	item.Callback = callback
 	item.Ctx = ctx
+	item.CreatedAt = time.Now()
 	s.activeWork.Add(1)
 
 	select {
@@ -198,33 +200,12 @@ func (s *Scheduler) SubmitWork(ctx context.Context, logInfo *certlib.CTLogInfo, 
 
 // Wait definition MUST be identical across builds.
 func (s *Scheduler) Wait() {
-	log.Println("Scheduler waiting for active work to complete...")
 	s.activeWork.Wait()
-	log.Println("Scheduler active work completed.")
 }
 
 // Shutdown definition MUST be identical across builds.
-// Operation: Non-blocking signal.
 func (s *Scheduler) Shutdown() {
-	if s.shutdown.CompareAndSwap(false, true) {
-		fmt.Println("Scheduler shutting down...")
-		s.cancel()
-		// TODO: Add mechanism to wait for worker completion if required by caller.
-		fmt.Println("Scheduler shutdown signal sent.")
-	}
-}
-
-// fnv1aHash definition MUST be identical across builds.
-// Constraint: Replace with xxh3.
-func fnv1aHash(s string) uint64 {
-	const (
-		offset64 = 14695981039346656037
-		prime64  = 1099511628211
-	)
-	var hash uint64 = offset64
-	for i := 0; i < len(s); i++ {
-		hash ^= uint64(s[i])
-		hash *= prime64
-	}
-	return hash
+	s.shutdown.Store(true)
+	s.cancel()
+	s.Wait()
 }

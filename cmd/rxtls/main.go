@@ -22,22 +22,25 @@ import (
 	"bufio"
 	"context"
 	"errors"
-	"sync"
-
-	// "flag" // No longer using the standard flag package directly
+	"flag"
 	"fmt"
+	"io"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
+	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
-	"github.com/x-stp/rxtls/internal/certlib"
-	"github.com/x-stp/rxtls/internal/core"
-
 	"github.com/spf13/cobra"
+	"github.com/x-stp/rxtls/internal/certlib"
+	"github.com/x-stp/rxtls/internal/client"
+	"github.com/x-stp/rxtls/internal/core"
+	"github.com/x-stp/rxtls/internal/metrics"
 )
 
 // Global flags (persistent across commands)
@@ -51,6 +54,12 @@ var (
 	showStats         bool
 	turbo             bool
 	compress          bool
+	logsFile          string // Added for fetch-logs command
+	ctURI             = flag.String("ct-uri", "", "CT log URI to process (overrides config)")
+	workers           = flag.Int("workers", runtime.NumCPU(), "Number of worker goroutines")
+	rateLimit         = flag.Float64("rate-limit", 100, "Initial rate limit in requests/second")
+	debug             = flag.Bool("debug", false, "Enable debug logging")
+	metricsPort       = flag.Int("metrics-port", 9090, "Prometheus metrics port")
 )
 
 var rootCmd = &cobra.Command{
@@ -78,7 +87,7 @@ var downloadCmd = &cobra.Command{
 	Short: "Download certificates (full B64 blob) from selected CT logs",
 	Run: func(cmd *cobra.Command, args []string) {
 		// Flags are parsed by Cobra and available via the variables
-		downloadLogs(outputDir, maxConcurrentLogs, bufferSize, showStats)
+		downloadLogs(outputDir, maxConcurrentLogs, bufferSize, showStats, compress, turbo)
 	},
 }
 
@@ -92,18 +101,28 @@ var domainsCmd = &cobra.Command{
 	},
 }
 
+var fetchLogsCmd = &cobra.Command{
+	Use:   "fetch-logs",
+	Short: "Fetch and save the CT logs list to a local file",
+	Run: func(cmd *cobra.Command, args []string) {
+		fetchAndSaveLogs()
+	},
+}
+
 // TODO: Add a domainsCmd if that functionality is restored
 // var domainsCmd = &cobra.Command{ ... }
 
 func init() {
 	// Persistent flags (available for all commands)
-	rootCmd.PersistentFlags().BoolVar(&useLocalLogs, "local-logs", true, "Use local all_logs_list.json instead of fetching from internet")
+	rootCmd.PersistentFlags().BoolVar(&useLocalLogs, "local-logs", false, "Use local all_logs_list.json instead of fetching from internet")
 
 	// Flags for the download command
 	downloadCmd.Flags().StringVarP(&outputDir, "output", "o", "output/certs", "Output directory for certificate blobs")
 	downloadCmd.Flags().IntVarP(&maxConcurrentLogs, "concurrency", "c", 0, "Maximum number of concurrent logs to process (0 for auto based on CPU)")
 	downloadCmd.Flags().IntVarP(&bufferSize, "buffer", "b", core.DefaultDiskBufferSize, "Internal buffer size in bytes for disk I/O")
 	downloadCmd.Flags().BoolVarP(&showStats, "stats", "s", true, "Show statistics during processing")
+	downloadCmd.Flags().BoolVar(&compress, "compress", false, "Compress output CSV files")
+	downloadCmd.Flags().BoolVar(&turbo, "turbo", false, "Enable high-speed mode (DNS prewarm, persistent connections)")
 
 	// Flags for the domains command (sharing some with download)
 	domainsCmd.Flags().StringVarP(&outputDir, "output", "o", "output/domains", "Output directory for domain CSV files") // Default to subfolder
@@ -113,17 +132,144 @@ func init() {
 	domainsCmd.Flags().BoolVar(&turbo, "turbo", false, "Enable high-speed mode (DNS prewarm, persistent connections)") // Added turbo flag
 	domainsCmd.Flags().BoolVar(&compress, "compress", false, "Compress output CSV files")
 
+	// Flags for the fetch-logs command
+	fetchLogsCmd.Flags().StringVarP(&logsFile, "output", "o", certlib.LocalLogsFile, "Output file for CT logs list")
+
 	// Add subcommands to the root command
 	rootCmd.AddCommand(listCmd)
 	rootCmd.AddCommand(downloadCmd)
-	rootCmd.AddCommand(domainsCmd) // Add the new domains command
+	rootCmd.AddCommand(domainsCmd)
+	rootCmd.AddCommand(fetchLogsCmd)
 }
 
 func main() {
-	if err := rootCmd.Execute(); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
+	flag.Parse()
+
+	// Initialize metrics
+	metrics.EnableMetrics()
+	if err := metrics.StartMetricsServer(fmt.Sprintf(":%d", *metricsPort)); err != nil {
+		log.Fatalf("Failed to start metrics server: %v", err)
 	}
+
+	// Only process -ct-uri directly if specified and no cobra command is used
+	if *ctURI != "" && len(os.Args) == 1 {
+		// Create output directory
+		if err := os.MkdirAll(outputDir, 0755); err != nil {
+			log.Fatalf("Failed to create output directory: %v", err)
+		}
+
+		// Create scheduler
+		ctx := context.Background()
+		scheduler, err := core.NewScheduler(ctx)
+		if err != nil {
+			log.Fatalf("Failed to create scheduler: %v", err)
+		}
+		defer scheduler.Shutdown()
+
+		// Process CT log
+		if err := processCTLog(*ctURI, scheduler); err != nil {
+			log.Fatalf("Error processing CT log: %v", err)
+		}
+
+		// Wait for all work to complete
+		scheduler.Wait()
+	} else {
+		// Execute cobra command
+		if err := rootCmd.Execute(); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+	}
+}
+
+func processCTLog(uri string, scheduler *core.Scheduler) error {
+	// Create log info
+	logInfo := &certlib.CTLogInfo{
+		URL: uri,
+	}
+
+	// Get log info
+	if err := certlib.GetLogInfo(logInfo); err != nil {
+		return err
+	}
+
+	// Process entries in batches
+	batchSize := 1000
+	for start := 0; start < int(logInfo.TreeSize); start += batchSize {
+		end := min(start+batchSize, int(logInfo.TreeSize))
+
+		// Submit work for this batch
+		err := scheduler.SubmitWork(context.Background(), logInfo, int64(start), int64(end), func(item *core.WorkItem) error {
+			// Process entries in this batch
+			entries, err := certlib.DownloadEntries(context.Background(), logInfo, int(item.Start), int(item.End))
+			if err != nil {
+				return err
+			}
+
+			// Process each entry
+			for _, entry := range entries.Entries {
+				// Parse certificate data
+				certData, err := certlib.ParseCertificateEntry(entry.LeafInput, entry.ExtraData, logInfo.URL)
+				if err != nil {
+					log.Printf("Error parsing certificate entry: %v", err)
+					continue
+				}
+
+				// Write domains to file
+				if len(certData.AllDomains) > 0 {
+					// Create domains file for this batch
+					domainsFile := outputDir + "/domains_" + logInfo.URL + "_" + string(item.Start) + "_" + string(item.End) + ".txt"
+					f, err := os.OpenFile(domainsFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+					if err != nil {
+						log.Printf("Error opening domains file: %v", err)
+						continue
+					}
+
+					// Write domains
+					for _, domain := range certData.AllDomains {
+						if _, err := f.WriteString(domain + "\n"); err != nil {
+							log.Printf("Error writing domain: %v", err)
+						}
+					}
+
+					f.Close()
+				}
+
+				// Write certificate data
+				if certData.AsDER != "" {
+					// Create certificates file for this batch
+					certsFile := outputDir + "/certs_" + logInfo.URL + "_" + string(item.Start) + "_" + string(item.End) + ".pem"
+					f, err := os.OpenFile(certsFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+					if err != nil {
+						log.Printf("Error opening certificates file: %v", err)
+						continue
+					}
+
+					// Write certificate
+					if _, err := f.WriteString("-----BEGIN CERTIFICATE-----\n"); err != nil {
+						log.Printf("Error writing certificate header: %v", err)
+					}
+					if _, err := f.WriteString(certData.AsDER); err != nil {
+						log.Printf("Error writing certificate data: %v", err)
+					}
+					if _, err := f.WriteString("\n-----END CERTIFICATE-----\n"); err != nil {
+						log.Printf("Error writing certificate footer: %v", err)
+					}
+
+					f.Close()
+				}
+			}
+
+			return nil
+		})
+
+		if err != nil {
+			log.Printf("Error submitting work for batch %d-%d: %v", start, end, err)
+			continue
+		}
+	}
+
+	return nil
 }
 
 func listLogs() {
@@ -159,9 +305,15 @@ func getLogState(log certlib.CTLogInfo) string {
 }
 
 // downloadLogs is the handler for the 'download' command.
-func downloadLogs(outputDir string, maxConcurrentLogs int, bufferSize int, showStats bool) {
-	log.Printf("Starting certificate download: output='%s', concurrency=%d, buffer=%d, stats=%t",
-		outputDir, maxConcurrentLogs, bufferSize, showStats)
+func downloadLogs(outputDir string, maxConcurrentLogs int, bufferSize int, showStats bool, compress bool, turbo bool) {
+	log.Printf("Starting certificate download: output='%s', concurrency=%d, buffer=%d, stats=%t, compress=%t, turbo=%t",
+		outputDir, maxConcurrentLogs, bufferSize, showStats, compress, turbo)
+
+	// Initialize HTTP client with turbo mode if requested
+	if turbo {
+		log.Println("Enabling turbo mode for HTTP client")
+		client.ConfigureTurboMode()
+	}
 
 	// 1. List logs for selection
 	allLogs, err := core.ListCTLogs()
@@ -210,33 +362,35 @@ func downloadLogs(outputDir string, maxConcurrentLogs int, bufferSize int, showS
 	}
 	// ----------------------------------------------
 
-	// 3. Create DownloadManager Configuration
-	// TODO: Add a --compress flag specific to download command if needed
+	// 3. Create and run the download manager
+	log.Printf("Starting download for %d selected logs...", len(selectedLogs))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Setup signal handling for graceful shutdown
+	signalChan := make(chan os.Signal, 1)
+	signal.Notify(signalChan, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		<-signalChan
+		log.Println("Interrupt received, initiating graceful shutdown...")
+		cancel()
+	}()
+
+	// Create the download manager
 	config := &core.DownloadConfig{
 		OutputDir:         outputDir,
 		BufferSize:        bufferSize,
 		MaxConcurrentLogs: maxConcurrentLogs,
-		CompressOutput:    false, // Assuming no compression for raw download for now
+		CompressOutput:    compress,
 	}
 
-	// 4. Setup Context and Signal Handling
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-	go func() {
-		sig := <-sigChan
-		log.Printf("Received signal %v, initiating shutdown...", sig)
-		cancel()
-	}()
-
-	// 5. Create and Run the Download Manager
+	// 4. Create and Run the Download Manager
 	downloader, err := core.NewDownloadManager(ctx, config)
 	if err != nil {
 		log.Fatalf("Failed to create download manager: %v", err)
 	}
 
-	// 6. Launch Stats Display Goroutine (if enabled)
+	// 5. Launch Stats Display Goroutine (if enabled)
 	var statsWg sync.WaitGroup
 	if showStats {
 		statsWg.Add(1)
@@ -246,22 +400,21 @@ func downloadLogs(outputDir string, maxConcurrentLogs int, bufferSize int, showS
 		}()
 	}
 
-	// 7. Start Download Process (BLOCKING)
-	log.Printf("Starting download for %d selected logs...", len(selectedLogs))
+	// 6. Start Download Process (BLOCKING)
 	err = downloader.DownloadCertificates(selectedLogs)
 	if err != nil && !errors.Is(err, context.Canceled) {
 		log.Printf("Error during certificate download: %v", err)
 	}
 	log.Println("Main download process finished or cancelled.")
 
-	// 8. Ensure stats goroutine finishes
+	// 7. Ensure stats goroutine finishes
 	if showStats {
 		log.Println("Waiting for statistics display to finish...")
 		cancel() // Ensure context is cancelled
 		statsWg.Wait()
 	}
 
-	// 9. Display Final Stats
+	// 8. Display Final Stats
 	displayFinalDownloadStats(downloader)
 	log.Println("Certificate download command complete.")
 }
@@ -332,6 +485,12 @@ func displayFinalDownloadStats(downloader *core.DownloadManager) {
 func extractDomains(outputDir string, maxConcurrentLogs int, bufferSize int, showStats bool, turbo bool, compress bool) {
 	log.Printf("Starting domain extraction: output='%s', concurrency=%d, buffer=%d, stats=%t, turbo=%t, compress=%t",
 		outputDir, maxConcurrentLogs, bufferSize, showStats, turbo, compress)
+
+	// Initialize HTTP client with turbo mode if requested
+	if turbo {
+		log.Println("Enabling turbo mode for HTTP client")
+		client.ConfigureTurboMode()
+	}
 
 	// 1. List logs for selection (Could be made non-interactive with flags/args later)
 	allLogs, err := core.ListCTLogs()
@@ -520,3 +679,51 @@ func displayFinalDomainStats(extractor *core.DomainExtractor) {
 func displayStats(engine *core.Engine) { ... }
 func displayFinalStats(engine *core.Engine) { ... }
 */
+
+// fetchAndSaveLogs fetches the CT logs list and saves it to a local file.
+func fetchAndSaveLogs() {
+	log.Printf("Fetching CT logs list to %s...", logsFile)
+
+	// Temporarily disable UseLocalLogs to force fetching from remote
+	oldUseLocalLogs := certlib.UseLocalLogs
+	certlib.UseLocalLogs = false
+
+	// Use the client package to fetch the logs list directly
+	httpClient := client.GetHTTPClient()
+	resp, err := httpClient.Get(certlib.CTLListsURL)
+	if err != nil {
+		log.Fatalf("Error fetching CT logs list: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		log.Fatalf("HTTP error %d fetching log list", resp.StatusCode)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		log.Fatalf("Error reading CT logs list body: %v", err)
+	}
+
+	// Save the response to the specified file
+	if err := os.WriteFile(logsFile, body, 0644); err != nil {
+		log.Fatalf("Error saving logs to file: %v", err)
+	}
+
+	log.Printf("Successfully saved CT logs list to %s", logsFile)
+
+	// Now try to parse and count the logs
+	tempLocalLogsFile := certlib.LocalLogsFile
+	certlib.LocalLogsFile = logsFile
+	certlib.UseLocalLogs = true
+	logs, err := core.ListCTLogs()
+	if err != nil {
+		log.Printf("Warning: Saved logs file but had error parsing it: %v", err)
+	} else {
+		log.Printf("Successfully parsed %d CT logs from the saved file", len(logs))
+	}
+
+	// Restore the original values
+	certlib.UseLocalLogs = oldUseLocalLogs
+	certlib.LocalLogsFile = tempLocalLogsFile
+}

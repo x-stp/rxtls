@@ -32,7 +32,7 @@ import (
 
 // Constants related to CT log interaction.
 const (
-	CTLListsURL         = "https://www.gstatic.com/ct/log_list/v3/all_logs_list.json"
+	CTLListsURL         = "https://www.gstatic.com/ct/log_list/v3/log_list.json"
 	CTLInfoURLTemplate  = "https://%s/ct/v1/get-sth"
 	DownloadURLTemplate = "https://%s/ct/v1/get-entries?start=%d&end=%d"
 	HTTPTimeout         = 30 // seconds
