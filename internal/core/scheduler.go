@@ -25,203 +25,149 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"math"
+	"math/rand"
 	"runtime"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/x-stp/rxtls/internal/certlib"
-
 	"github.com/zeebo/xxh3"
+
+	"github.com/prometheus/client_golang/prometheus"
 	"golang.org/x/sys/unix"
 	"golang.org/x/time/rate"
 )
 
-// WorkItem represents a unit of work (fetching/processing a block of CT entries).
-// It is pooled via sync.Pool to reduce allocations in the hot path.
-// Memory layout: Struct fields are standard types. Padding is not explicitly added here
-// but could be considered if profiling reveals false sharing on LogInfo or Callback access.
+const (
+	// DefaultWorkerRateLimit is the default rate limit per worker
+	DefaultWorkerRateLimit = rate.Limit(25)
+
+	// DefaultWorkerBurst is the default burst limit per worker
+	DefaultWorkerBurst = 35
+
+	// MaxShardQueueSize is the maximum size of a shard's queue
+	MaxShardQueueSize = 1000
+
+	// WorkerMultiplier is the multiplier for the number of workers
+	WorkerMultiplier = 2
+
+	// RetryBaseDelay is the base delay for retries
+	RetryBaseDelay = 125 * time.Millisecond
+
+	// RetryMaxDelay is the maximum delay for retries
+	RetryMaxDelay = 30 * time.Second
+
+	// RetryBackoffMultiplier is the multiplier for exponential backoff
+	RetryBackoffMultiplier = 1.5
+
+	// RetryJitterFactor is the jitter factor for randomized backoff
+	RetryJitterFactor = 0.2
+)
+
+// WorkItem represents a unit of work to be processed by the scheduler
 type WorkItem struct {
-	LogURL   string                     // Used for sharding work across workers.
-	LogInfo  *certlib.CTLogInfo         // Pointer to CT log metadata needed for processing (e.g., DownloadEntries). Reused.
-	Start    int64                      // Start index for the entry block.
-	End      int64                      // End index for the entry block.
-	Attempt  int                        // Tracks retry attempts for failed processing.
-	Callback func(item *WorkItem) error // Function to execute for this work item. Zero-alloc if it's a method value or global func.
-	Ctx      context.Context            // Added context for the specific task
+	// Immutable fields
+	LogURL    string
+	LogInfo   *certlib.CTLogInfo
+	Start     int64
+	End       int64
+	Callback  WorkCallback
+	Ctx       context.Context
+	CreatedAt time.Time
+
+	// Mutable fields
+	Attempt int
+	Error   error
 }
 
-// Scheduler manages a pool of worker goroutines, assigns them to CPU cores (on Linux),
-// and dispatches WorkItems to them based on a hash of the LogURL.
-// Goal: Maximize parallel processing, minimize cross-core communication overhead.
-// Memory layout: Contains slices and maps. Ensure worker slice doesn't cause false sharing if accessed concurrently (unlikely here).
+// WorkCallback is the function signature for work item callbacks
+type WorkCallback func(item *WorkItem) error
+
+// Scheduler manages a pool of workers and distributes work among them
 type Scheduler struct {
 	numWorkers   int
-	workers      []*worker          // Slice of worker goroutine managers.
-	ctx          context.Context    // Master context for shutdown signalling.
-	cancel       context.CancelFunc // Function to trigger shutdown.
-	shutdown     atomic.Bool        // Flag to prevent submitting work during/after shutdown.
-	workItemPool sync.Pool          // Pool for reusing WorkItem structs, reducing GC pressure.
-	activeWork   sync.WaitGroup     // Tracks actively processing work items.
-	// TODO: Add padding if profiling shows contention on shutdown flag or pool access.
+	workers      []*Worker
+	ctx          context.Context
+	cancel       context.CancelFunc
+	shutdown     atomic.Bool
+	workItemPool sync.Pool
+	activeWork   sync.WaitGroup // Tracks active work
+	metrics      *prometheus.GaugeVec
 }
 
-// worker encapsulates a single worker goroutine and its state.
-// Goal: Each worker processes tasks independently on its assigned core.
-// Memory layout: Contains channel and pointers. Padding is unlikely to be needed unless queue access becomes a major bottleneck.
-type worker struct {
-	id          int             // Identifier for logging/debugging.
-	cpuAffinity int             // Target CPU core ID for affinity setting.
-	queue       chan *WorkItem  // Buffered channel acting as the work queue for this worker.
-	scheduler   *Scheduler      // Pointer back to the scheduler for accessing shared resources (e.g., pool).
-	ctx         context.Context // Worker-specific context linked to the scheduler's context.
-	limiter     *rate.Limiter   // Rate limiter for this worker's queue
+// Worker represents a worker goroutine in the scheduler
+type Worker struct {
+	// Immutable fields
+	id          int
+	ctx         context.Context
+	cancel      context.CancelFunc
+	scheduler   *Scheduler
+	queue       chan *WorkItem
+	limiter     *rate.Limiter
+	cpuAffinity int
+
+	// Metrics
+	processed  atomic.Int64
+	errors     atomic.Int64
+	panics     atomic.Int64
+	busy       atomic.Bool
+	lastActive atomic.Int64
 }
 
-// NewScheduler creates, configures, and starts the scheduler and its worker pool.
-// It attempts to set CPU affinity for each worker on Linux systems.
-// Operation: Blocking (at startup), allocates worker/channel resources.
+// NewScheduler creates a new scheduler with the specified number of workers
 func NewScheduler(parentCtx context.Context) (*Scheduler, error) {
-	// Calculate worker count based on CPU cores and multiplier.
 	numWorkers := runtime.NumCPU() * WorkerMultiplier
 	if numWorkers <= 0 {
-		numWorkers = 1 // Safety: Ensure at least one worker exists.
+		numWorkers = 1
 	}
 
-	// Create a cancellable context for the scheduler and its workers.
 	sctx, cancel := context.WithCancel(parentCtx)
 
-	// Initialize the scheduler struct.
 	s := &Scheduler{
 		numWorkers: numWorkers,
-		workers:    make([]*worker, numWorkers), // Preallocate worker slice.
+		workers:    make([]*Worker, numWorkers),
 		ctx:        sctx,
 		cancel:     cancel,
-		workItemPool: sync.Pool{ // Initialize the WorkItem pool.
+		workItemPool: sync.Pool{
 			New: func() interface{} {
-				// Allocate a new WorkItem only when the pool is empty.
-				return &WorkItem{}
+				return &WorkItem{
+					CreatedAt: time.Now(),
+				}
 			},
 		},
-		// shutdown flag defaults to false (zero value).
 	}
 
-	// Rate limiter settings
-	// Allow bursts up to queue size, high initial rate (e.g., 1000/s)
 	initialRate := rate.Limit(1000)
 	burstSize := MaxShardQueueSize
 
-	// Create and start each worker goroutine.
 	for i := 0; i < numWorkers; i++ {
-		w := &worker{
+		w := &Worker{
 			id:          i,
-			cpuAffinity: i % runtime.NumCPU(),                    // Simple round-robin core assignment.
-			queue:       make(chan *WorkItem, MaxShardQueueSize), // Create buffered channel queue.
+			cpuAffinity: i % runtime.NumCPU(),
+			queue:       make(chan *WorkItem, MaxShardQueueSize),
 			scheduler:   s,
 			ctx:         sctx,
-			// Initialize limiter for each worker
-			limiter: rate.NewLimiter(initialRate, burstSize),
+			limiter:     rate.NewLimiter(initialRate, burstSize),
 		}
 		s.workers[i] = w
-		go w.run() // Launch the worker's main loop non-blockingly.
+		go w.run() // Start the worker goroutine
 	}
 
-	log.Printf("Scheduler initialized with %d workers (CPU affinity enabled).\n", numWorkers)
+	fmt.Printf("Scheduler initialized with %d workers (CPU affinity enabled).\n", numWorkers)
 	return s, nil
 }
 
-// run is the main processing loop for a single worker goroutine.
-// It first attempts to set CPU affinity, then enters a loop reading from its queue.
-// Hot Path: Yes. Must be zero-GC, non-blocking (except on queue read).
-func (w *worker) run() {
-	// Set CPU Affinity - this is best-effort.
-	setAffinity(w.id, w.cpuAffinity)
-
-	// Loop indefinitely, processing work items until context is cancelled.
-	for {
-		select {
-		// Prioritize checking for shutdown signal.
-		case <-w.ctx.Done():
-			return // Exit goroutine on context cancellation.
-		// Read the next work item from the dedicated channel queue.
-		// This blocks if the queue is empty, yielding the CPU.
-		case item := <-w.queue:
-			if item == nil { // Safety check, queue should only receive non-nil items.
-				continue
-			}
-
-			// Mark work as done when the callback finishes or panics
-			func() {
-				defer w.scheduler.activeWork.Done() // Signal completion via WaitGroup
-				defer func() {
-					if r := recover(); r != nil {
-						// Log panics in callbacks
-						log.Printf("Panic recovered in worker %d processing item for %s (%d-%d): %v", w.id, item.LogURL, item.Start, item.End, r)
-						// TODO: Increment a panic/failure counter stat
-					}
-				}()
-
-				// Execute the assigned task. This is the core work (e.g., download, parse, write).
-				// Performance depends heavily on the callback implementation.
-				err := item.Callback(item)
-				if err != nil {
-					// Basic error logging. Replace with structured/batched logging.
-					// TODO: Implement retry mechanism using item.Attempt instead of just logging.
-					log.Printf("Error processing item for %s (%d-%d): %v\n", item.LogURL, item.Start, item.End, err)
-				}
-			}()
-
-			// Return the WorkItem struct to the pool for reuse.
-			// Reset fields to avoid data leakage between uses.
-			item.Callback = nil
-			item.LogURL = ""
-			item.LogInfo = nil
-			item.Ctx = nil                     // Reset context
-			w.scheduler.workItemPool.Put(item) // Reduces allocation churn.
-		}
-	}
-}
-
-// setAffinity attempts to bind the current goroutine's OS thread to a specific CPU core.
-// This is a Linux-specific optimization to improve cache locality.
-// Operation: Blocking (briefly for syscalls), potentially fails silently.
-func setAffinity(workerID, cpuID int) {
-	// runtime.LockOSThread ensures the goroutine doesn't migrate OS threads
-	// between this call and the SchedSetaffinity syscall.
-	runtime.LockOSThread()
-	// No defer runtime.UnlockOSThread() because the worker goroutine runs for the
-	// lifetime of the scheduler; unlocking isn't necessary unless the thread needs
-	// to be reused for other goroutines later (which isn't the case here).
-
-	var cpuSet unix.CPUSet
-	cpuSet.Zero()     // Initialize the CPU set.
-	cpuSet.Set(cpuID) // Add the target CPU core to the set.
-
-	// Get the OS thread ID for the current goroutine.
-	tid := unix.Gettid()
-
-	// Attempt to set the CPU affinity for this thread.
-	err := unix.SchedSetaffinity(tid, &cpuSet)
-	if err != nil {
-		// Log failure as a warning; the program can continue without affinity.
-		log.Printf("Warning: Failed to set CPU affinity for worker %d on core %d (tid: %d): %v\n", workerID, cpuID, tid, err)
-	}
-}
-
-// SubmitWork routes a work item to a specific worker queue based on hashing the logURL.
-// It uses a non-blocking send to the worker's channel to provide backpressure.
-// Hot Path: Yes, called frequently to dispatch work.
-// Operation: Non-blocking (unless pool Get blocks), low allocation (pool Get/Put).
-func (s *Scheduler) SubmitWork(ctx context.Context, logInfo *certlib.CTLogInfo, start, end int64, callback func(item *WorkItem) error) error {
+// SubmitWork submits work to the least loaded worker
+func (s *Scheduler) SubmitWork(ctx context.Context, logInfo *certlib.CTLogInfo, start, end int64, callback WorkCallback) error {
 	if s.shutdown.Load() {
 		return fmt.Errorf("scheduler is shutting down")
 	}
+
 	logURL := logInfo.URL
 	shardIndex := int(xxh3.HashString(logURL) % uint64(s.numWorkers))
 	targetWorker := s.workers[shardIndex]
-
-	// NOTE: Rate limiting is now handled by the CALLER using limiter.Wait()
-	// before calling SubmitWork. SubmitWork now focuses purely on the atomic
-	// queue submission attempt and reporting backpressure.
 
 	item := s.workItemPool.Get().(*WorkItem)
 	item.LogURL = logURL
@@ -231,46 +177,224 @@ func (s *Scheduler) SubmitWork(ctx context.Context, logInfo *certlib.CTLogInfo, 
 	item.Attempt = 0
 	item.Callback = callback
 	item.Ctx = ctx
+	item.CreatedAt = time.Now()
 	s.activeWork.Add(1)
 
 	select {
 	case targetWorker.queue <- item:
-		// Optional: Increase rate limit slowly on success?
-		// currentLimit := targetWorker.limiter.Limit()
-		// targetWorker.limiter.SetLimit(min(currentLimit * 1.01, rate.Limit(10000))) // Example increase
-		return nil // Success
+		// Optional: Increase rate limit on success
+		return nil
 	default:
-		// Queue is full - signal backpressure immediately
+		// Backpressure: Queue full.
 		s.activeWork.Done()
 		s.workItemPool.Put(item)
-		// Optional: Aggressively reduce rate limit on detected backpressure
-		// currentLimit := targetWorker.limiter.Limit()
-		// newLimit := max(currentLimit / 2, rate.Limit(1)) // Halve rate, minimum 1/s
-		// targetWorker.limiter.SetLimit(newLimit)
-		// log.Printf("Worker %d queue full, reducing limit to %v", targetWorker.id, newLimit)
+		// Optional: Decrease rate limit
 		return fmt.Errorf("worker %d for log %s: %w", targetWorker.id, logURL, ErrQueueFull)
 	}
 }
 
-// Wait waits until all submitted work items have been processed.
+// Wait waits for all active work to complete
 func (s *Scheduler) Wait() {
-	log.Println("Scheduler waiting for active work to complete...")
 	s.activeWork.Wait()
-	log.Println("Scheduler active work completed.")
 }
 
-// Shutdown initiates a graceful shutdown of the scheduler and its workers.
-// Operation: Non-blocking signal, does not wait for workers to finish.
+// Shutdown shuts down the scheduler
 func (s *Scheduler) Shutdown() {
-	// Use atomic CompareAndSwap to ensure shutdown logic runs only once.
-	if s.shutdown.CompareAndSwap(false, true) {
-		log.Println("Scheduler shutting down...")
-		// Cancel the context, signalling all workers listening on w.ctx.Done().
-		s.cancel()
-		// Note: This function returns immediately. Waiting for actual worker completion
-		// would require additional synchronization (e.g., a sync.WaitGroup coordinated
-		// within the worker run loops or the calling code).
-		// TODO: Add mechanism to wait for worker completion if required by caller.
-		log.Println("Scheduler shutdown signal sent.")
+	s.shutdown.Store(true)
+	s.cancel()
+	s.Wait()
+}
+
+// run is the main loop for a worker
+func (w *Worker) run() {
+	// Set CPU affinity if supported
+	if runtime.GOOS == "linux" {
+		setCPUAffinity(w.id, w.cpuAffinity)
 	}
+
+	log.Printf("Worker %d started", w.id)
+
+	for {
+		select {
+		case <-w.ctx.Done():
+			// Scheduler is shutting down
+			log.Printf("Worker %d shutting down", w.id)
+			return
+
+		case item := <-w.queue:
+			// Process work item
+			w.processWorkItem(item)
+		}
+	}
+}
+
+// processWorkItem processes a work item
+func (w *Worker) processWorkItem(item *WorkItem) {
+	// Mark worker as busy
+	w.busy.Store(true)
+	w.lastActive.Store(time.Now().UnixNano())
+
+	// Ensure worker is marked as not busy when done
+	defer func() {
+		w.busy.Store(false)
+	}()
+
+	// Check if context is cancelled
+	if item.Ctx.Err() != nil {
+		w.handleCancelledItem(item)
+		return
+	}
+
+	// Execute callback with panic recovery
+	var err error
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				w.panics.Add(1)
+				err = fmt.Errorf("panic in callback: %v", r)
+			}
+		}()
+
+		// Execute callback
+		err = item.Callback(item)
+	}()
+
+	// Handle result
+	if err != nil {
+		w.handleFailedItem(item, err)
+	} else {
+		w.handleSuccessfulItem(item)
+	}
+}
+
+// handleSuccessfulItem handles a successful work item
+func (w *Worker) handleSuccessfulItem(item *WorkItem) {
+	// Update metrics
+	w.processed.Add(1)
+
+	// Mark work as done
+	w.scheduler.activeWork.Done()
+
+	// Return item to pool
+	item.Callback = nil
+	item.LogInfo = nil
+	item.Ctx = nil
+	item.Error = nil
+	w.scheduler.workItemPool.Put(item)
+}
+
+// handleFailedItem handles a failed work item
+func (w *Worker) handleFailedItem(item *WorkItem, err error) {
+	// Update metrics
+	w.errors.Add(1)
+
+	// Store error
+	item.Error = err
+
+	// Check if we should retry
+	if item.Attempt < 3 {
+		w.retryItem(item)
+		return
+	}
+
+	// Exhausted retries
+	// Mark work as done
+	w.scheduler.activeWork.Done()
+
+	// Return to pool
+	item.Callback = nil
+	item.LogInfo = nil
+	item.Ctx = nil
+	item.Error = nil
+	w.scheduler.workItemPool.Put(item)
+}
+
+// handleCancelledItem handles a cancelled work item
+func (w *Worker) handleCancelledItem(item *WorkItem) {
+	// Store error
+	item.Error = ErrWorkerShutdown
+
+	// Mark work as done
+	w.scheduler.activeWork.Done()
+
+	// Return to pool
+	item.Callback = nil
+	item.LogInfo = nil
+	item.Ctx = nil
+	w.scheduler.workItemPool.Put(item)
+}
+
+// retryItem schedules a retry for an item
+func (w *Worker) retryItem(item *WorkItem) {
+	item.Attempt++
+	delay := calculateRetryDelay(item.Attempt)
+	w.scheduleRetry(item, delay)
+}
+
+// scheduleRetry schedules a retry after a delay
+func (w *Worker) scheduleRetry(item *WorkItem, delay time.Duration) {
+	// Wait for retry delay
+	select {
+	case <-time.After(delay):
+		// Continue with retry
+	case <-item.Ctx.Done():
+		// Context cancelled, no retry
+		w.handleCancelledItem(item)
+		return
+	case <-w.ctx.Done():
+		// Scheduler shutting down, no retry
+		w.handleCancelledItem(item)
+		return
+	}
+
+	// Check if context is still valid
+	if item.Ctx.Err() != nil {
+		w.handleCancelledItem(item)
+		return
+	}
+
+	// Submit to worker's queue
+	select {
+	case w.queue <- item:
+		// Successfully queued
+		return
+	default:
+		// Queue is full, try another worker
+		for i := 0; i < w.scheduler.numWorkers; i++ {
+			worker := w.scheduler.workers[(w.id+i+1)%w.scheduler.numWorkers]
+			select {
+			case worker.queue <- item:
+				// Successfully queued
+				return
+			default:
+				// Queue is full, try next worker
+			}
+		}
+
+		// All queues are full, retry later
+		go w.scheduleRetry(item, delay*2)
+	}
+}
+
+// calculateRetryDelay calculates the retry delay with exponential backoff and jitter
+func calculateRetryDelay(attempt int) time.Duration {
+	// Base delay with exponential backoff
+	delay := time.Duration(float64(RetryBaseDelay) * math.Pow(RetryBackoffMultiplier, float64(attempt-1)))
+	if delay > RetryMaxDelay {
+		delay = RetryMaxDelay
+	}
+
+	// Add jitter
+	jitterRange := float64(delay) * RetryJitterFactor
+	jitterAmount := time.Duration(rand.Float64() * jitterRange)
+	return delay + jitterAmount
+}
+
+// setCPUAffinity sets the CPU affinity for a worker
+func setCPUAffinity(workerID, cpuID int) {
+	// Set CPU affinity for the current thread
+	var cpuSet unix.CPUSet
+	cpuSet.Zero()
+	cpuSet.Set(cpuID)
+	unix.SchedSetaffinity(0, &cpuSet)
 }

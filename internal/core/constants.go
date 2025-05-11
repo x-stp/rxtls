@@ -22,93 +22,93 @@ import (
 	"time"
 )
 
-// Constants tuned for maximum throughput on modern Linux.
-// These values dictate concurrency, memory usage, and network behaviour.
-// They should be revisited based on profiling and target hardware.
+// Constants for memory, networking, etc. that aren't defined in common.go
 const (
-	// --- Concurrency ---
-
-	// WorkerMultiplier determines goroutine count relative to CPU cores.
-	// Goal: Keep CPUs saturated without excessive context switching.
-	// Value `4` assumes some I/O wait allows more goroutines than cores.
-	// Constraint: Must be >= 1.
-	WorkerMultiplier = 4
-
-	// MaxShardQueueSize limits buffered work per worker queue.
-	// Goal: Provide backpressure to prevent OOM if producers are faster than consumers.
-	// Constraint: Affects memory usage (numWorkers * MaxShardQueueSize * sizeof(WorkItem)).
-	MaxShardQueueSize = 1024
-
 	// --- Memory ---
 
+	// MaxWorkers is the maximum number of workers
+	MaxWorkers = 1024
+
+	// DefaultShards is the default number of shards
+	DefaultShards = 16
+
 	// CacheLineSize is used for struct padding to prevent false sharing between cores.
-	// Goal: Improve atomic/concurrent access performance.
-	// Constraint: Assumed value, might need arch-specific detection via `unsafe` if critical.
 	CacheLineSize = 64
 
 	// DefaultNetworkBufferSize sets the size for pooled network read buffers.
-	// Goal: Reduce allocs during network reads, fit typical CT entry batches.
-	// Constraint: Affects memory pool size.
 	DefaultNetworkBufferSize = 128 * 1024 // 128KB
 
 	// DefaultDiskBufferSize sets the size for `bufio.Writer` instances.
-	// Goal: Reduce syscalls (write) by batching disk I/O.
-	// Constraint: Affects memory usage per active output file.
 	DefaultDiskBufferSize = 256 * 1024 // 256KB
 
 	// CertProcessingBatchSize dictates how many certs are processed logically together.
-	// Goal: Amortize costs like locking or flushing.
-	// Constraint: Larger batches increase latency for individual cert results.
 	CertProcessingBatchSize = 1024
 
 	// --- Networking ---
 
-	// MaxConcurrentDownloadsPerHost limits simultaneous connections *per target CT log host*.
-	// Goal: Avoid overwhelming single log servers, respect implicit rate limits.
-	// Constraint: Overall concurrency also limited by global scheduler workers.
-	// TODO: This needs actual implementation, likely via a per-host semaphore map.
-	// MaxConcurrentDownloadsPerHost = 128
-
 	// MaxNetworkRetries defines how many times to retry a failed network op (STH/entries).
-	// Goal: Handle transient network errors gracefully.
-	// Constraint: Increases latency on failure.
-	MaxNetworkRetries = 2
+	MaxNetworkRetries = 3
 
-	// BaseRetryDelay is the initial wait time before the first retry.
-	// Goal: Avoid immediate hammering on failure. Used with exponential backoff.
-	// Constraint: Affects minimum failure recovery time.
-	BaseRetryDelay = 250 * time.Millisecond
+	// MaxSubmitRetries defines how many times to retry submitting work to a worker queue.
+	MaxSubmitRetries = 2
 
 	// DialTimeout limits time spent establishing a TCP connection.
-	// Goal: Fail fast on unresponsive hosts.
-	// Constraint: Needs tuning based on expected network conditions.
-	DialTimeout = 5 * time.Second
+	DialTimeout = 10 * time.Second
 
 	// RequestTimeout limits the *total* time for an HTTP request (connect, send, receive headers/body).
-	// Goal: Prevent goroutines from hanging indefinitely on slow servers.
-	// Constraint: Must be longer than DialTimeout + expected processing time.
 	RequestTimeout = 15 * time.Second
 
 	// KeepAliveTimeout determines how long idle connections are kept open in the pool.
-	// Goal: Reuse TCP connections to reduce handshake latency.
-	// Constraint: Higher values consume resources for longer.
 	KeepAliveTimeout = 60 * time.Second
 
-	// --- Disk I/O ---
+	// ReadTimeout limits time spent waiting for bytes after connection success.
+	ReadTimeout = 45 * time.Second
 
-	// DiskFlushBatchSize dictates how many *processed* entries trigger a buffer flush.
-	// Goal: Balance latency (seeing results on disk) vs. I/O efficiency.
-	// Constraint: Tied to CertProcessingBatchSize for simplicity here.
-	DiskFlushBatchSize = CertProcessingBatchSize
+	// IdleConnTimeout is the max time conns stay idle in pool before closing.
+	IdleConnTimeout = 60 * time.Second
+
+	// ResponseHeaderTimeout limits time waiting for response headers.
+	ResponseHeaderTimeout = 15 * time.Second
+
+	// MaxIdleConnsPerHost limits idle connections kept for a single host.
+	MaxIdleConnsPerHost = 25
+
+	// DefaultRequestTimeout is the default timeout for HTTP requests.
+	DefaultRequestTimeout = 60 * time.Second
 
 	// --- CT Log Specific ---
 
 	// DefaultLogEntryBlockSize is used if a CT log doesn't provide its preferred block size.
-	// Goal: Sensible default for fetching entries.
-	// Constraint: Performance might vary depending on the log server.
 	DefaultLogEntryBlockSize = 64
-)
 
-// TODO (Self-Correction): Remove this file later if constants become highly localized
-// or are better derived dynamically (e.g., CacheLineSize via unsafe).
-// For now, centralizing helps overview during rewrite.
+	// DefaultBatchSize is the default batch size for GET entries.
+	DefaultBatchSize = 1000
+
+	// DefaultMaxParallelBatches controls how many batches we process concurrently.
+	DefaultMaxParallelBatches = 50
+
+	// MaxConcurrentDownloadsPerHost limits concurrent outbound connections to a log server.
+	MaxConcurrentDownloadsPerHost = 50
+
+	// MaxRetries defines the maximum number of retries for failed network operations.
+	MaxRetries = 5
+
+	// --- Disk I/O ---
+
+	// DiskFlushBatchSize dictates how many *processed* entries trigger a buffer flush.
+	DiskFlushBatchSize = CertProcessingBatchSize
+
+	// --- Observability ---
+
+	// RequestHistorySize is the number of recent requests to keep for observability.
+	RequestHistorySize = 1000
+
+	// LogHistorySize is the number of log messages to keep in memory.
+	LogHistorySize = 5000
+
+	// StatsReportInterval is how often to report stats to stdout/log.
+	StatsReportInterval = 5 * time.Second
+
+	// MinimumProgressLoggingInterval is the minimum interval for progress updates.
+	MinimumProgressLoggingInterval = 1 * time.Second
+)

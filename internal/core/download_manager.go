@@ -233,8 +233,8 @@ func (dm *DownloadManager) processSingleLogForDownload(ctlog *certlib.CTLogInfo)
 		}
 
 		// Now attempt submission (with minimal retry for transient full queue)
-		maxSubmitRetries := 2
-		submitRetryDelay := 10 * time.Millisecond
+		maxSubmitRetries := MaxSubmitRetries
+		submitRetryDelay := 750 * time.Millisecond
 		submitted := false
 		for attempt := 0; attempt < maxSubmitRetries; attempt++ {
 			if dm.ctx.Err() != nil {

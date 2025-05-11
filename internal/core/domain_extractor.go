@@ -280,8 +280,8 @@ func (de *DomainExtractor) processSingleLogForDomains(ctlog *certlib.CTLogInfo) 
 		}
 
 		// Now attempt submission (with minimal retry for transient full queue)
-		maxSubmitRetries := 2 // Only retry briefly after rate limit wait
-		submitRetryDelay := 10 * time.Millisecond
+		maxSubmitRetries := 15 // Only retry briefly after rate limit wait
+		submitRetryDelay := 750 * time.Millisecond
 		submitted := false
 		for attempt := 0; attempt < maxSubmitRetries; attempt++ {
 			if de.ctx.Err() != nil {
