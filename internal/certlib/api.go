@@ -28,9 +28,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"log"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -88,12 +88,11 @@ func GetCTLogs() ([]CTLogInfo, error) {
 		return ctlogs, nil
 	}
 
-	// Network fetch
+	// Network fetch using shared client
 	log.Println("Fetching CT log list from", CTLListsURL)
-	client := &http.Client{
-		Timeout: time.Duration(HTTPTimeout) * time.Second,
-	}
-	resp, err := client.Get(CTLListsURL)
+	httpClient := client.GetHTTPClient()
+
+	resp, err := httpClient.Get(CTLListsURL)
 	if err != nil {
 		return nil, fmt.Errorf("error retrieving CT logs list: %w", err)
 	}
@@ -106,19 +105,75 @@ func GetCTLogs() ([]CTLogInfo, error) {
 		return nil, fmt.Errorf("error reading CT log list body: %w", err)
 	}
 
-	var ctlResponse CTLResponse
-	if err := json.Unmarshal(body, &ctlResponse); err != nil {
-		return nil, fmt.Errorf("error parsing CT logs list JSON: %w", err)
+	// Try to parse as V3 format first (same as in loadLocalCTLogs)
+	var v3Response struct {
+		Operators []struct {
+			Name string `json:"name"`
+			Logs []struct {
+				Description string                 `json:"description"`
+				URL         string                 `json:"url"`
+				State       map[string]interface{} `json:"state"`
+			} `json:"logs"`
+		} `json:"operators"`
 	}
 
-	// Process response (uses old format)
-	return processOldFormat(&ctlResponse)
+	if err := json.Unmarshal(body, &v3Response); err == nil {
+		// Process V3 format
+		var ctlogs []CTLogInfo
+		for _, operator := range v3Response.Operators {
+			for _, logEntry := range operator.Logs {
+				if logEntry.URL == "" {
+					continue
+				}
+				url := cleanLogURL(logEntry.URL)
+				if isLogUsable(logEntry.State) {
+					ctlogs = append(ctlogs, CTLogInfo{
+						URL:         url,
+						Description: logEntry.Description,
+						OperatedBy:  operator.Name,
+						BlockSize:   64, // Default
+					})
+				}
+			}
+		}
+		log.Printf("Found %d usable CT logs from remote (V3 format)", len(ctlogs))
+		return ctlogs, nil
+	}
+
+	// Fallback to V2/older format
+	log.Printf("Failed to parse remote logs as V3, trying older format")
+	var ctlResponse CTLResponse
+	if errFallback := json.Unmarshal(body, &ctlResponse); errFallback != nil {
+		// Save the response to a file for debugging
+		debugFile := "debug_ct_logs_response.json"
+		if err := os.WriteFile(debugFile, body, 0644); err == nil {
+			log.Printf("Saved problematic response to %s for debugging", debugFile)
+		}
+		return nil, fmt.Errorf("error parsing CT logs list JSON with known formats: %w", errFallback)
+	}
+
+	// Process response using old format
+	logs, err := processOldFormat(&ctlResponse)
+	if err != nil {
+		return nil, fmt.Errorf("error processing old format logs: %w", err)
+	}
+
+	// If we got logs successfully, save them to the local file for future use
+	if len(logs) > 0 {
+		if err := os.WriteFile(LocalLogsFile, body, 0644); err != nil {
+			log.Printf("Warning: Failed to save logs to local file: %v", err)
+		} else {
+			log.Printf("Saved logs to %s for future use", LocalLogsFile)
+		}
+	}
+
+	return logs, nil
 }
 
 // loadLocalCTLogs reads and parses the log list from a local JSON file.
 // Operation: Disk I/O bound, allocates for file read and JSON parsing.
 func loadLocalCTLogs(filename string) ([]CTLogInfo, error) {
-	data, err := ioutil.ReadFile(filename)
+	data, err := os.ReadFile(filename)
 	if err != nil {
 		return nil, fmt.Errorf("error reading local logs file: %w", err)
 	}
@@ -172,10 +227,8 @@ func cleanLogURL(rawURL string) string {
 	} else if strings.HasPrefix(url, "http://") {
 		url = url[7:]
 	}
-	if strings.HasSuffix(url, "/") {
-		url = url[:len(url)-1]
-	}
-	return url
+
+	return strings.TrimSuffix(url, "/")
 }
 
 // isLogUsable helper
@@ -218,83 +271,138 @@ func processOldFormat(ctlResponse *CTLResponse) ([]CTLogInfo, error) {
 		}
 	}
 	log.Printf("Found %d usable CT logs in local file (Fallback format)", len(ctlogs))
+
+	if len(ctlogs) == 0 {
+		return nil, fmt.Errorf("no usable CT logs found in fallback format")
+	}
+
 	return ctlogs, nil
 }
 
-// GetLogInfo fetches the Signed Tree Head (STH) for a specific log to get its size.
-// Operation: Network I/O bound. Allocates for HTTP client, request, response, JSON parsing.
+// GetLogInfo retrieves the tree size from a CT log.
+// Operation: Network bound. Allocates during HTTP fetch and JSON parsing.
 func GetLogInfo(ctlog *CTLogInfo) error {
-	client := client.GetSharedClient() // Get shared client
-	// Clone transport for per-log TLS config
-	transport := client.Transport.(*http.Transport).Clone()
-	transport.TLSClientConfig = ctlog.GetTLSConfig()
-	tempClient := &http.Client{Transport: transport, Timeout: client.Timeout}
+	// Use shared HTTP client
+	httpClient := client.GetHTTPClient()
 
-	url := fmt.Sprintf(CTLInfoURLTemplate, ctlog.URL)
-	resp, err := tempClient.Get(url) // Use temp client
+	// Construct URL
+	url := fmt.Sprintf("https://%s/ct/v1/get-sth", ctlog.URL)
+
+	// Make the request with retry logic
+	var resp *http.Response
+	var err error
+	maxRetries := 3
+	retryDelay := 100 * time.Millisecond
+
+	for attempt := range maxRetries {
+		resp, err = httpClient.Get(url)
+		if err == nil && resp.StatusCode == http.StatusOK {
+			break
+		}
+
+		if resp != nil {
+			resp.Body.Close()
+		}
+
+		if attempt < maxRetries-1 {
+			log.Printf("Retrying GetLogInfo for %s after error: %v (attempt %d/%d)",
+				ctlog.URL, err, attempt+1, maxRetries)
+			time.Sleep(retryDelay)
+			retryDelay *= 2 // Exponential backoff
+		}
+	}
+
 	if err != nil {
-		return fmt.Errorf("error retrieving STH for %s: %w", ctlog.URL, err)
+		return fmt.Errorf("error retrieving log info after %d attempts: %w", maxRetries, err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		resp.Body.Close()
+		return fmt.Errorf("HTTP error %d fetching log info for %s", resp.StatusCode, ctlog.URL)
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		return fmt.Errorf("HTTP error %d fetching STH for %s. Body: %s", resp.StatusCode, ctlog.URL, string(bodyBytes))
-	}
-	body, err := ioutil.ReadAll(resp.Body)
+
+	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return fmt.Errorf("error reading STH response body for %s: %w", ctlog.URL, err)
+		return fmt.Errorf("error reading log info body: %w", err)
 	}
+
 	var treeSize TreeSizeResponse
 	if err := json.Unmarshal(body, &treeSize); err != nil {
-		bodySnippet := string(body)
-		if len(bodySnippet) > 100 {
-			bodySnippet = bodySnippet[:100] + "..."
-		}
-		return fmt.Errorf("error parsing STH JSON for %s: %w. Body prefix: %s", ctlog.URL, err, bodySnippet)
+		return fmt.Errorf("error parsing log info JSON: %w", err)
 	}
+
 	ctlog.TreeSize = treeSize.TreeSize
-	if ctlog.IsDigiCert() {
-		ctlog.BlockSize = 32
-	} else {
-		ctlog.BlockSize = 64
-	}
 	return nil
 }
 
-// DownloadEntries fetches a block of entries from a specific CT log.
-// It now accepts a parent context to enable cancellation.
+// DownloadEntries retrieves a range of entries from a CT log.
+// Operation: Network bound. Allocates during HTTP fetch and JSON parsing.
 func DownloadEntries(ctx context.Context, ctlog *CTLogInfo, start, end int) (*EntriesResponse, error) {
-	client := client.GetSharedClient() // Get shared client
-	// Clone transport for per-log TLS config
-	transport := client.Transport.(*http.Transport).Clone()
-	transport.TLSClientConfig = ctlog.GetTLSConfig()
-	tempClient := &http.Client{Transport: transport, Timeout: client.Timeout}
+	// Use shared HTTP client
+	httpClient := client.GetHTTPClient()
 
-	url := fmt.Sprintf(DownloadURLTemplate, ctlog.URL, start, end)
+	// Construct URL
+	url := fmt.Sprintf("https://%s/ct/v1/get-entries?start=%d&end=%d", ctlog.URL, start, end)
+
+	// Create request with context
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
-		return nil, fmt.Errorf("error creating request for %s (%d-%d): %w", ctlog.URL, start, end, err)
+		return nil, fmt.Errorf("error creating request: %w", err)
 	}
 
-	resp, err := tempClient.Do(req) // Use temp client
-	if err != nil {
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			return nil, err // Return context error directly
+	// Make the request with retry logic
+	var resp *http.Response
+	maxRetries := 3
+	retryDelay := 500 * time.Millisecond
+
+	for attempt := range maxRetries {
+		resp, err = httpClient.Do(req)
+		if err == nil && resp.StatusCode == http.StatusOK {
+			break
 		}
-		return nil, fmt.Errorf("error downloading entries %s (%d-%d): %w", ctlog.URL, start, end, err)
+
+		if resp != nil {
+			resp.Body.Close()
+		}
+
+		// Check if context is cancelled before retrying
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+
+		if attempt < maxRetries-1 {
+			log.Printf("Retrying DownloadEntries for %s (%d-%d) after error: %v (attempt %d/%d)",
+				ctlog.URL, start, end, err, attempt+1, maxRetries)
+
+			// Use context-aware sleep
+			select {
+			case <-time.After(retryDelay):
+				retryDelay *= 2 // Exponential backoff
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		}
+	}
+
+	if err != nil {
+		return nil, fmt.Errorf("error downloading entries after %d attempts: %w", maxRetries, err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		resp.Body.Close()
+		return nil, fmt.Errorf("HTTP error %d fetching entries for %s (%d-%d)", resp.StatusCode, ctlog.URL, start, end)
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("HTTP error %d GET %s (%d-%d)", resp.StatusCode, ctlog.URL, start, end)
-	}
-	body, err := ioutil.ReadAll(resp.Body)
+
+	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("error reading entries response body for %s (%d-%d): %w", ctlog.URL, start, end, err)
+		return nil, fmt.Errorf("error reading entries body: %w", err)
 	}
+
 	var entries EntriesResponse
 	if err := json.Unmarshal(body, &entries); err != nil {
-		return nil, fmt.Errorf("error parsing entries JSON for %s (%d-%d): %w", ctlog.URL, start, end, err)
+		return nil, fmt.Errorf("error parsing entries JSON: %w", err)
 	}
+
 	return &entries, nil
 }
 
