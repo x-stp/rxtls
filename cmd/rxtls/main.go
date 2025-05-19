@@ -1,3 +1,30 @@
+/*
+Package main is the entry point for the rxtls command-line application.
+
+rxtls is a tool designed for interacting with Certificate Transparency (CT) logs.
+Its primary functionalities include:
+  - Listing available CT logs.
+  - Downloading raw certificate entries (as base64 blobs) from specified CT logs.
+  - Extracting domain names (Common Name and Subject Alternative Names) from certificate entries
+    and saving them to CSV files.
+  - Fetching and caching the official list of CT logs.
+
+The application uses the Cobra library for command-line interface structure and flag parsing.
+It leverages several internal packages:
+  - `internal/certlib`: For CT log interaction logic, data models, and parsing certificate entries.
+  - `internal/client`: For a configurable HTTP client used for network requests.
+  - `internal/core`: For the core processing engine, including a concurrent scheduler, download manager,
+    and domain extractor.
+  - `internal/metrics`: For exposing Prometheus metrics for monitoring application performance.
+
+Global flags allow users to specify options like using a local log list cache.
+Subcommands (`list`, `download`, `domains`, `fetch-logs`) provide access to different functionalities,
+each with its own set of specific flags for configuration (e.g., output directory, concurrency).
+
+The main function initializes a Prometheus metrics server and then either processes a single CT log URI
+(if provided directly as a flag without a subcommand) or executes the appropriate Cobra subcommand.
+Graceful shutdown is handled via context cancellation triggered by OS signals (SIGINT, SIGTERM).
+*/
 package main
 
 /*
@@ -109,9 +136,6 @@ var fetchLogsCmd = &cobra.Command{
 	},
 }
 
-// TODO: Add a domainsCmd if that functionality is restored
-// var domainsCmd = &cobra.Command{ ... }
-
 func init() {
 	// Persistent flags (available for all commands)
 	rootCmd.PersistentFlags().BoolVar(&useLocalLogs, "local-logs", false, "Use local all_logs_list.json instead of fetching from internet")
@@ -218,7 +242,7 @@ func processCTLog(uri string, scheduler *core.Scheduler) error {
 				// Write domains to file
 				if len(certData.AllDomains) > 0 {
 					// Create domains file for this batch
-					domainsFile := outputDir + "/domains_" + logInfo.URL + "_" + string(item.Start) + "_" + string(item.End) + ".txt"
+					domainsFile := outputDir + "/domains_" + logInfo.URL + "_" + strconv.FormatInt(item.Start, 10) + "_" + strconv.FormatInt(item.End, 10) + ".txt"
 					f, err := os.OpenFile(domainsFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 					if err != nil {
 						log.Printf("Error opening domains file: %v", err)
@@ -238,7 +262,7 @@ func processCTLog(uri string, scheduler *core.Scheduler) error {
 				// Write certificate data
 				if certData.AsDER != "" {
 					// Create certificates file for this batch
-					certsFile := outputDir + "/certs_" + logInfo.URL + "_" + string(item.Start) + "_" + string(item.End) + ".pem"
+					certsFile := outputDir + "/certs_" + logInfo.URL + "_" + strconv.FormatInt(item.Start, 10) + "_" + strconv.FormatInt(item.End, 10) + ".pem"
 					f, err := os.OpenFile(certsFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 					if err != nil {
 						log.Printf("Error opening certificates file: %v", err)

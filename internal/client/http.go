@@ -18,6 +18,14 @@ You should have received a copy of the GNU Affero General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
+/*
+Package client provides a configurable HTTP client for making requests to Certificate Transparency logs and other services.
+It includes support for connection pooling, timeouts, and a "turbo" mode for aggressive, high-throughput scenarios.
+
+The package manages a shared global HTTP client instance that can be configured once and then retrieved by multiple
+parts of the application. This promotes reuse of TCP connections and consistent client behavior.
+*/
+
 import (
 	"net"
 	"net/http"
@@ -25,42 +33,69 @@ import (
 	"time"
 )
 
-// Define needed constants locally for the client
+// HTTP client-specific constants.
 const (
-	DialTimeout         = 5 * time.Second
-	KeepAliveTimeout    = 60 * time.Second
-	RequestTimeout      = 15 * time.Second
-	MaxIdleConnsPerHost = 150 // Default value
+	// DialTimeout is the maximum amount of time a dial will wait for a connect to complete.
+	DialTimeout = 5 * time.Second
+	// KeepAliveTimeout is the interval between keep-alive probes for active network connections.
+	// If zero, keep-alive probes are sent with a default OS-dependent interval.
+	KeepAliveTimeout = 60 * time.Second
+	// RequestTimeout is the timeout for the entire HTTP request, including connection time, all redirects, and reading the response body.
+	RequestTimeout = 15 * time.Second
+	// MaxIdleConnsPerHost is the maximum number of idle (keep-alive) connections to keep per-host.
+	MaxIdleConnsPerHost = 150 // Default value, can be overridden by Config.
 )
 
 var (
-	// Default client settings
-	defaultDialTimeout      = 5 * time.Second
+	// defaultDialTimeout specifies the default timeout for establishing a new connection.
+	defaultDialTimeout = 5 * time.Second
+	// defaultKeepAliveTimeout specifies the default keep-alive period for an active network connection.
 	defaultKeepAliveTimeout = 60 * time.Second
-	defaultIdleConnTimeout  = 90 * time.Second
-	defaultMaxIdleConns     = 100
-	defaultMaxConnsPerHost  = 100
-	defaultRequestTimeout   = 15 * time.Second
+	// defaultIdleConnTimeout is the maximum amount of time an idle (keep-alive) connection will remain
+	// idle before closing itself.
+	defaultIdleConnTimeout = 90 * time.Second
+	// defaultMaxIdleConns controls the maximum number of idle (keep-alive) connections across all hosts.
+	defaultMaxIdleConns = 100
+	// defaultMaxConnsPerHost controls the maximum number of connections per host (includes dial, active, and idle).
+	defaultMaxConnsPerHost = 100
+	// defaultRequestTimeout specifies the default timeout for a complete HTTP request.
+	defaultRequestTimeout = 15 * time.Second
 
-	// Shared client instance with mutex for config updates
-	sharedClient      *http.Client
-	sharedClientLock  sync.RWMutex
+	// sharedClient is the global HTTP client instance used by the application.
+	// It is lazily initialized on first use or when explicitly configured.
+	sharedClient *http.Client
+	// sharedClientLock protects access to sharedClient and clientInitialized.
+	sharedClientLock sync.RWMutex
+	// clientInitialized indicates whether the sharedClient has been initialized.
 	clientInitialized bool
 )
 
-// ClientConfig holds configuration for the HTTP client
-type ClientConfig struct {
-	DialTimeout      time.Duration
+// Config holds configuration parameters for the HTTP client.
+// These settings allow tuning of connection pooling, timeouts, and other transport-level behaviors.
+// A zero-value Config will result in default settings being used.
+type Config struct {
+	// DialTimeout is the maximum duration for establishing a new connection.
+	DialTimeout time.Duration
+	// KeepAliveTimeout specifies the keep-alive period for an active network connection.
 	KeepAliveTimeout time.Duration
-	IdleConnTimeout  time.Duration
-	MaxIdleConns     int
-	MaxConnsPerHost  int
-	RequestTimeout   time.Duration
+	// IdleConnTimeout is the maximum amount of time an idle (keep-alive) connection
+	// will remain idle before closing itself.
+	IdleConnTimeout time.Duration
+	// MaxIdleConns controls the maximum number of idle (keep-alive) connections across all hosts.
+	MaxIdleConns int
+	// MaxConnsPerHost controls the maximum number of connections per host, including connections in the dialing,
+	// active, and idle states. On limit violation, dials will block.
+	MaxConnsPerHost int
+	// RequestTimeout is the timeout for the entire HTTP request, including connection time,
+	// all redirects, and reading the response body.
+	RequestTimeout time.Duration
 }
 
-// DefaultClientConfig returns the default HTTP client configuration
-func DefaultClientConfig() *ClientConfig {
-	return &ClientConfig{
+// DefaultConfig returns a new Config struct populated with default HTTP client settings.
+// These defaults are sensible for general-purpose HTTP interactions but may need tuning
+// for specific high-performance or constrained environments.
+func DefaultConfig() *Config {
+	return &Config{
 		DialTimeout:      defaultDialTimeout,
 		KeepAliveTimeout: defaultKeepAliveTimeout,
 		IdleConnTimeout:  defaultIdleConnTimeout,
@@ -70,63 +105,81 @@ func DefaultClientConfig() *ClientConfig {
 	}
 }
 
-// InitHTTPClient initializes the shared HTTP client with the given configuration
-func InitHTTPClient(config *ClientConfig) {
+// InitHTTPClient initializes or reconfigures the shared global HTTP client with the provided configuration.
+// If a nil config is provided, it uses the default configuration obtained from DefaultConfig().
+// This function is thread-safe.
+//
+// Note: Calling this function will replace the existing shared client, potentially affecting
+// in-flight requests made with the old client if its transport was not reusable or if connections
+// were specific to the old transport's settings.
+func InitHTTPClient(config *Config) {
 	sharedClientLock.Lock()
 	defer sharedClientLock.Unlock()
 
 	if config == nil {
-		config = DefaultClientConfig()
+		config = DefaultConfig()
 	}
 
+	// Configure the transport with timeouts and connection pooling options.
+	// ForceAttemptHTTP2 is enabled to prefer HTTP/2 if available.
 	transport := &http.Transport{
-		Proxy: http.ProxyFromEnvironment,
+		Proxy: http.ProxyFromEnvironment, // Respect standard proxy environment variables.
 		DialContext: (&net.Dialer{
 			Timeout:   config.DialTimeout,
-			KeepAlive: config.KeepAliveTimeout,
+			KeepAlive: config.KeepAliveTimeout, // Enables TCP keep-alives.
 		}).DialContext,
 		MaxIdleConns:        config.MaxIdleConns,
 		MaxIdleConnsPerHost: config.MaxConnsPerHost,
 		IdleConnTimeout:     config.IdleConnTimeout,
-		DisableCompression:  false,
-		ForceAttemptHTTP2:   true,
+		DisableCompression:  false, // Enable compression (e.g., gzip) by default.
+		ForceAttemptHTTP2:   true,  // Try to use HTTP/2.
 	}
 
 	sharedClient = &http.Client{
 		Transport: transport,
-		Timeout:   config.RequestTimeout,
+		Timeout:   config.RequestTimeout, // Overall request timeout.
 	}
 
 	clientInitialized = true
 }
 
-// GetHTTPClient returns the shared HTTP client, initializing it with default settings if needed
+// GetHTTPClient returns the shared global HTTP client instance.
+// If the client has not been initialized, it will be initialized with default settings.
+// This function is thread-safe.
 func GetHTTPClient() *http.Client {
-	sharedClientLock.RLock()
+	sharedClientLock.RLock() // Use RLock for initial check to allow concurrent reads.
 	if !clientInitialized {
 		sharedClientLock.RUnlock()
-		InitHTTPClient(nil) // Initialize with defaults
-		sharedClientLock.RLock()
+		// Client not initialized, need to acquire a write lock.
+		// This double-check locking pattern minimizes write lock contention.
+		InitHTTPClient(nil)      // Initialize with defaults under a write lock.
+		sharedClientLock.RLock() // Re-acquire read lock to safely access sharedClient.
 	}
 	client := sharedClient
 	sharedClientLock.RUnlock()
 	return client
 }
 
-// ConfigureHTTPClient updates the HTTP client configuration
-func ConfigureHTTPClient(config *ClientConfig) {
-	InitHTTPClient(config) // This will lock and update the client
+// ConfigureHTTPClient provides a convenience function to update the shared HTTP client's configuration.
+// It's equivalent to calling InitHTTPClient.
+// This function is thread-safe.
+func ConfigureHTTPClient(config *Config) {
+	InitHTTPClient(config) // InitHTTPClient handles locking.
 }
 
-// ConfigureTurboMode sets aggressive HTTP client settings for maximum throughput
+// ConfigureTurboMode applies a set of aggressive HTTP client settings optimized for
+// high-throughput scenarios, such as massively parallel log fetching.
+// This typically involves shorter dial timeouts, longer keep-alive and idle timeouts,
+// and higher connection pool limits.
+// This function is thread-safe.
 func ConfigureTurboMode() {
-	turboConfig := &ClientConfig{
-		DialTimeout:      2 * time.Second,
-		KeepAliveTimeout: 120 * time.Second,
-		IdleConnTimeout:  120 * time.Second,
-		MaxIdleConns:     500,
-		MaxConnsPerHost:  200,
-		RequestTimeout:   30 * time.Second,
+	turboConfig := &Config{
+		DialTimeout:      2 * time.Second,   // Faster dial attempts.
+		KeepAliveTimeout: 120 * time.Second, // Keep connections alive longer.
+		IdleConnTimeout:  120 * time.Second, // Allow idle connections to persist longer.
+		MaxIdleConns:     500,               // Larger overall idle connection pool.
+		MaxConnsPerHost:  200,               // More connections allowed per host.
+		RequestTimeout:   30 * time.Second,  // Slightly longer request timeout for potentially slower turbo operations.
 	}
 	ConfigureHTTPClient(turboConfig)
 }

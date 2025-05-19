@@ -227,10 +227,8 @@ func cleanLogURL(rawURL string) string {
 	} else if strings.HasPrefix(url, "http://") {
 		url = url[7:]
 	}
-	if strings.HasSuffix(url, "/") {
-		url = url[:len(url)-1]
-	}
-	return url
+
+	return strings.TrimSuffix(url, "/")
 }
 
 // isLogUsable helper
@@ -296,7 +294,7 @@ func GetLogInfo(ctlog *CTLogInfo) error {
 	maxRetries := 3
 	retryDelay := 100 * time.Millisecond
 
-	for attempt := 0; attempt < maxRetries; attempt++ {
+	for attempt := range maxRetries {
 		resp, err = httpClient.Get(url)
 		if err == nil && resp.StatusCode == http.StatusOK {
 			break
@@ -357,7 +355,7 @@ func DownloadEntries(ctx context.Context, ctlog *CTLogInfo, start, end int) (*En
 	maxRetries := 3
 	retryDelay := 500 * time.Millisecond
 
-	for attempt := 0; attempt < maxRetries; attempt++ {
+	for attempt := range maxRetries {
 		resp, err = httpClient.Do(req)
 		if err == nil && resp.StatusCode == http.StatusOK {
 			break

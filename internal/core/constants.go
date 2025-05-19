@@ -1,3 +1,12 @@
+/*
+Package core constants that are not specific to a single manager/component but are shared across the core logic.
+This file centralizes various configurable parameters related to memory management, networking behavior,
+CT log interaction defaults, disk I/O, and observability.
+
+These constants are intended to provide sensible defaults and can be tuned for different performance profiles
+or operational environments. They are distinct from the very fundamental constants defined in common.go
+(like worker multipliers or base retry delays) and focus more on higher-level application behavior settings.
+*/
 package core
 
 /*
@@ -22,93 +31,124 @@ import (
 	"time"
 )
 
-// Constants for memory, networking, etc. that aren't defined in common.go
+// Application-wide constants for tuning performance and behavior.
 const (
 	// --- Memory ---
 
-	// MaxWorkers is the maximum number of workers
-	MaxWorkers = 1024
+	// MaxWorkers defines the absolute upper limit on the number of concurrent worker goroutines
+	// that the scheduler will create. This acts as a safeguard regardless of CPU core count or multipliers.
+	MaxWorkers = 2048
 
-	// DefaultShards is the default number of shards
-	DefaultShards = 16
+	// DefaultShards specifies the default number of shards used by the scheduler for distributing
+	// work based on log URL hashing. This helps in balancing load across workers.
+	// This value is not directly used by the current scheduler implementation, which shards by numWorkers.
+	DefaultShards = 32 // TODO: Re-evaluate or remove if scheduler sharding remains worker-based.
 
-	// CacheLineSize is used for struct padding to prevent false sharing between cores.
+	// CacheLineSize is a common CPU cache line size in bytes. It's used as a guideline for padding
+	// in data structures to help prevent false sharing when multiple CPU cores access adjacent memory locations.
 	CacheLineSize = 64
 
-	// DefaultNetworkBufferSize sets the size for pooled network read buffers.
-	DefaultNetworkBufferSize = 128 * 1024 // 128KB
+	// DefaultNetworkBufferSize is the default size for buffers used in network read operations.
+	// Larger buffers can reduce the number of read syscalls but increase memory footprint.
+	DefaultNetworkBufferSize = 256 * 1024 // 256KB
 
-	// DefaultDiskBufferSize sets the size for `bufio.Writer` instances.
+	// DefaultDiskBufferSize is the default size for `bufio.Writer` instances used for disk I/O.
+	// Similar to network buffers, this trades memory for potentially fewer write syscalls.
 	DefaultDiskBufferSize = 256 * 1024 // 256KB
 
-	// CertProcessingBatchSize dictates how many certs are processed logically together.
-	CertProcessingBatchSize = 1024
+	// CertProcessingBatchSize dictates how many certificates are grouped together for logical processing steps,
+	// such as batching writes to disk or updating progress metrics.
+	CertProcessingBatchSize = 1024 * 10
 
 	// --- Networking ---
 
-	// MaxNetworkRetries defines how many times to retry a failed network op (STH/entries).
-	MaxNetworkRetries = 3
+	// MaxNetworkRetries specifies the maximum number of times a failed network operation
+	// (like fetching STH or log entries) will be retried by components in `certlib`.
+	MaxNetworkRetries = 6
 
-	// MaxSubmitRetries defines how many times to retry submitting work to a worker queue.
-	MaxSubmitRetries = 2
+	// MaxSubmitRetries is the maximum number of times a component (like DownloadManager or DomainExtractor)
+	// will attempt to submit a work item to a worker's queue if it's initially full (ErrQueueFull).
+	// This is for retrying the *submission* to the queue, not the work item execution itself.
+	MaxSubmitRetries = 2 // Reduced from 5 as queue full should be handled by rate limiting ideally.
 
-	// DialTimeout limits time spent establishing a TCP connection.
+	// DialTimeout limits the time spent establishing a new TCP connection to a remote server.
 	DialTimeout = 10 * time.Second
 
-	// RequestTimeout limits the *total* time for an HTTP request (connect, send, receive headers/body).
+	// RequestTimeout sets the maximum duration for an entire HTTP request, encompassing
+	// connection establishment, sending the request, and receiving the full response body.
+	// This is typically applied at the http.Client level.
 	RequestTimeout = 15 * time.Second
 
-	// KeepAliveTimeout determines how long idle connections are kept open in the pool.
+	// KeepAliveTimeout defines the keep-alive period for an active network connection.
+	// This is used by the net.Dialer to configure TCP keep-alives.
 	KeepAliveTimeout = 60 * time.Second
 
-	// ReadTimeout limits time spent waiting for bytes after connection success.
-	ReadTimeout = 45 * time.Second
+	// ReadTimeout is the maximum duration for reading the next chunk of data from a connection
+	// after a successful connection and request send. Not directly used by client, but a common HTTP server setting.
+	ReadTimeout = 15 * time.Second // Typically a server-side setting or per-request on client.
 
-	// IdleConnTimeout is the max time conns stay idle in pool before closing.
-	IdleConnTimeout = 60 * time.Second
+	// IdleConnTimeout is the maximum amount of time an idle (keep-alive) connection will remain
+	// in the HTTP client's connection pool before being closed.
+	IdleConnTimeout = 120 * time.Second
 
-	// ResponseHeaderTimeout limits time waiting for response headers.
+	// ResponseHeaderTimeout limits the time spent waiting to receive the complete response headers
+	// from the server after the request has been sent.
 	ResponseHeaderTimeout = 15 * time.Second
 
-	// MaxIdleConnsPerHost limits idle connections kept for a single host.
-	MaxIdleConnsPerHost = 25
+	// MaxIdleConnsPerHost controls the maximum number of idle connections that will be maintained
+	// in the pool for any single host. This helps prevent resource exhaustion when interacting
+	// with many different hosts.
+	MaxIdleConnsPerHost = 55
 
-	// DefaultRequestTimeout is the default timeout for HTTP requests.
-	DefaultRequestTimeout = 60 * time.Second
+	// DefaultRequestTimeout is a general default timeout for HTTP requests, potentially used
+	// by components that don't have a more specific timeout configured.
+	// It's similar to RequestTimeout but might be used as a fallback.
+	DefaultRequestTimeout = 30 * time.Second
 
 	// --- CT Log Specific ---
 
-	// DefaultLogEntryBlockSize is used if a CT log doesn't provide its preferred block size.
+	// DefaultLogEntryBlockSize is the number of entries to request in a single `get-entries`
+	// call if the CT log does not specify its own preferred block size (max_entries_per_get).
 	DefaultLogEntryBlockSize = 64
 
-	// DefaultBatchSize is the default batch size for GET entries.
-	DefaultBatchSize = 1000
+	// DefaultBatchSize defines a common batch size for fetching entries from CT logs.
+	// This is often a multiple of the log's block size.
+	DefaultBatchSize = 1024 * 4
 
-	// DefaultMaxParallelBatches controls how many batches we process concurrently.
-	DefaultMaxParallelBatches = 50
+	// DefaultMaxParallelBatches sets a soft limit on how many batches of log entries
+	// might be processed in parallel by the application. This can help manage memory and CPU load.
+	DefaultMaxParallelBatches = 50 // This constant appears to be for higher-level batching strategy.
 
-	// MaxConcurrentDownloadsPerHost limits concurrent outbound connections to a log server.
+	// MaxConcurrentDownloadsPerHost limits how many concurrent `get-entries` requests rxtls
+	// will make to a single CT log server host. This is crucial for being a good network citizen.
+	// This would typically be enforced by the HTTP client's MaxConnsPerHost or similar, or custom logic.
 	MaxConcurrentDownloadsPerHost = 50
 
 	// MaxRetries defines the maximum number of retries for failed network operations.
+	// This is similar to MaxNetworkRetries but might be used by different components with different retry policies.
 	MaxRetries = 5
 
 	// --- Disk I/O ---
 
-	// DiskFlushBatchSize dictates how many *processed* entries trigger a buffer flush.
+	// DiskFlushBatchSize indicates how many *processed* certificate entries should trigger
+	// a flush of the output file buffer to disk. This helps ensure data is persisted regularly.
 	DiskFlushBatchSize = CertProcessingBatchSize
 
 	// --- Observability ---
 
-	// RequestHistorySize is the number of recent requests to keep for observability.
-	RequestHistorySize = 1000
+	// RequestHistorySize is the number of recent network request details to retain in memory
+	// for observability or debugging purposes (e.g., for a live dashboard or error analysis).
+	RequestHistorySize = 1000 // Currently not implemented, but a common pattern.
 
-	// LogHistorySize is the number of log messages to keep in memory.
-	LogHistorySize = 5000
+	// LogHistorySize determines the number of recent log messages to keep in an in-memory buffer
+	// for potential display or inspection, especially in UIs or diagnostic tools.
+	LogHistorySize = 5000 // Currently not implemented.
 
-	// StatsReportInterval is how often to report stats to stdout/log.
-	StatsReportInterval = 5 * time.Second
+	// StatsReportInterval specifies how frequently summary statistics (e.g., download progress,
+	// processing rates) should be reported, typically to standard output or a log file.
+	StatsReportInterval = 10 * time.Second
 
-	// MinimumProgressLoggingInterval is the minimum interval for progress updates.
-	MinimumProgressLoggingInterval = 1 * time.Second
+	// MinimumProgressLoggingInterval defines the minimum time that must elapse between
+	// progress log updates to avoid flooding logs with too frequent updates.
+	MinimumProgressLoggingInterval = 5 * time.Second
 )

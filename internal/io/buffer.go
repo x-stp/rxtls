@@ -143,10 +143,10 @@ func NewAsyncBuffer(ctx context.Context, path string, options *AsyncBufferOption
 	// Open file with direct I/O if supported and requested
 	flag := os.O_CREATE | os.O_WRONLY | os.O_TRUNC
 	if options.AlignWrites && runtime.GOOS == "linux" {
-		// O_DIRECT is only available on Linux
+		// oDirect is only available on Linux
 		// Use a constant value instead of syscall.O_DIRECT to avoid build errors on other platforms
-		const O_DIRECT = 0x4000 // Linux specific
-		flag |= O_DIRECT
+		const oDirect = 0x4000 // Linux specific
+		flag |= oDirect
 	}
 
 	file, err := os.OpenFile(path, flag, 0644)

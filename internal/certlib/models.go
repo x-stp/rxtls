@@ -129,13 +129,13 @@ func (c *CertificateData) Chain() string {
 	return fmt.Sprintf("%x", h)
 }
 
-// NormalizedDomainsSet returns a set (map[string]bool) of normalized domains.
-func (c *CertificateData) NormalizedDomainsSet() map[string]bool {
-	result := make(map[string]bool, len(c.AllDomains))
+// NormalizedDomainsSet returns a set (map[string]struct{}) of normalized domains.
+func (c *CertificateData) NormalizedDomainsSet() map[string]struct{} {
+	result := make(map[string]struct{}, len(c.AllDomains))
 	for _, domain := range c.AllDomains {
 		normalized := NormalizeDomain(domain)
 		if normalized != "" {
-			result[normalized] = true
+			result[normalized] = struct{}{}
 		}
 	}
 	return result
@@ -300,8 +300,8 @@ func NormalizeDomain(domain string) string {
 	if len(domain) > 2 && domain[:2] == "*." {
 		domain = domain[2:] // Strip leading wildcard
 	}
-	parts := strings.Split(domain, ".")
-	for _, part := range parts {
+	parts := strings.SplitSeq(domain, ".")
+	for part := range parts {
 		if strings.HasPrefix(part, "-") || strings.HasSuffix(part, "-") || strings.HasPrefix(part, "*") {
 			return domain // Invalid label structure after potential stripping
 		}
