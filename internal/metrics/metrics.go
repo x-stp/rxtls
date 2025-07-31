@@ -22,6 +22,7 @@ import (
 	"context"
 	"log"
 	"net/http"
+	"strconv"
 	"sync"
 	"time"
 
@@ -414,12 +415,12 @@ func (m *Metrics) UpdateQueueMetrics(workerID int, logURL string, queueSize, que
 		return
 	}
 
-	m.QueueSize.WithLabelValues(string(workerID), logURL).Set(float64(queueSize))
-	m.QueueCapacity.WithLabelValues(string(workerID)).Set(float64(queueCapacity))
+	m.QueueSize.WithLabelValues(strconv.Itoa(workerID), logURL).Set(float64(queueSize))
+	m.QueueCapacity.WithLabelValues(strconv.Itoa(workerID)).Set(float64(queueCapacity))
 
 	if queueCapacity > 0 {
 		pressure := float64(queueSize) / float64(queueCapacity)
-		m.QueuePressure.WithLabelValues(string(workerID), logURL).Set(pressure)
+		m.QueuePressure.WithLabelValues(strconv.Itoa(workerID), logURL).Set(pressure)
 	}
 }
 
@@ -429,7 +430,7 @@ func (m *Metrics) UpdateWorkerRateLimit(workerID int, rateLimit float64) {
 		return
 	}
 
-	m.WorkerRateLimit.WithLabelValues(string(workerID)).Set(rateLimit)
+	m.WorkerRateLimit.WithLabelValues(strconv.Itoa(workerID)).Set(rateLimit)
 }
 
 // UpdateRetriesRate updates the retries rate metric

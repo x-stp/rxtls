@@ -479,7 +479,8 @@ func (dm *DownloadManager) processSingleLogForDownload(ctlog *certlib.CTLogInfo)
 // submitDownloadBlock attempts to submit a work block with retries
 func (dm *DownloadManager) submitDownloadBlock(ctx context.Context, ctlog *certlib.CTLogInfo, start, end int64) error {
 	// Determine target worker based on log URL (consistent sharding)
-	shardIndex := int(xxh3.HashString(ctlog.URL) % uint64(dm.scheduler.numWorkers))
+	hash := xxh3.HashString(ctlog.URL)
+	shardIndex := int(hash % uint64(dm.scheduler.numWorkers))
 	targetWorker := dm.scheduler.workers[shardIndex]
 
 	// Wait on rate limiter

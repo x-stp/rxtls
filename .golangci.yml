@@ -1,0 +1,248 @@
+# golangci-lint configuration for rxtls
+# This config enables comprehensive linting with focus on security and code quality
+
+run:
+  # Timeout for analysis
+  timeout: 5m
+  
+  # Include test files
+  tests: true
+  
+  # Skip directories
+  skip-dirs:
+    - vendor
+    - third_party
+    - testdata
+    - examples
+    - dist
+  
+  # Skip files
+  skip-files:
+    - ".*\\.pb\\.go$"
+    - ".*\\.gen\\.go$"
+
+# Output configuration
+output:
+  # Format of the output
+  format: colored-line-number
+  
+  # Print lines of code with issue
+  print-issued-lines: true
+  
+  # Print linter name in the end of issue text
+  print-linter-name: true
+
+linters:
+  enable:
+    # Security
+    - gosec        # Security checker
+    - exportloopref # Checks for pointers to enclosing loop variables
+    
+    # Bug detection
+    - staticcheck  # Advanced static analysis
+    - bodyclose    # Checks HTTP response body is closed
+    - nilerr       # Finds code returning nil even if it checks for error
+    - errcheck     # Checks for unchecked errors
+    - ineffassign  # Detects ineffectual assignments
+    
+    # Code quality
+    - revive       # Fast, configurable linter
+    - govet        # Reports suspicious constructs
+    - gofmt        # Checks formatting
+    - goimports    # Checks imports formatting
+    - misspell     # Finds misspelled words
+    - unconvert    # Removes unnecessary type conversions
+    - prealloc     # Finds slice declarations that could be preallocated
+    - nakedret     # Finds naked returns in long functions
+    
+    # Style
+    - gocritic     # Highly extensible Go source code linter
+    - gocyclo      # Checks cyclomatic complexity
+    - gocognit     # Checks cognitive complexity
+    - funlen       # Checks function length
+    - lll          # Reports long lines
+    
+    # Performance
+    - goconst      # Finds repeated strings that could be constants
+    - gosimple     # Simplifies code
+    
+    # Best practices
+    - unparam      # Reports unused function parameters
+    - dogsled      # Checks assignments with too many blank identifiers
+    - dupl         # Checks for duplicated code
+    - godox        # Detects TODO/FIXME/etc comments
+    
+  disable:
+    - gomnd        # Magic number detector - too noisy for CT log processing
+    - wsl          # Whitespace linter - too strict
+    - nlreturn     # Too strict about newlines
+    - gochecknoinits # We might need init functions
+    - gochecknoglobals # We use some globals for configuration
+
+linters-settings:
+  # Security
+  gosec:
+    severity: "high"
+    confidence: "medium"
+    # Rules to exclude
+    excludes:
+      - G104 # Unhandled errors - we use errcheck for this
+      - G304 # File path provided as taint input - we need this for user-specified paths
+    config:
+      global:
+        audit: true
+
+  # Code quality
+  revive:
+    severity: warning
+    enable-all-rules: false
+    rules:
+      - name: blank-imports
+      - name: context-as-argument
+      - name: context-keys-type
+      - name: dot-imports
+      - name: error-return
+      - name: error-strings
+      - name: error-naming
+      - name: exported
+      - name: if-return
+      - name: increment-decrement
+      - name: var-naming
+      - name: var-declaration
+      - name: package-comments
+      - name: range
+      - name: receiver-naming
+      - name: time-naming
+      - name: unexported-return
+      - name: indent-error-flow
+      - name: errorf
+      - name: empty-block
+      - name: superfluous-else
+      - name: unused-parameter
+      - name: unreachable-code
+      - name: redefines-builtin-id
+
+  # Bug detection
+  staticcheck:
+    checks: ["all", "-ST1000", "-ST1003", "-ST1016"]
+
+  errcheck:
+    # Report about not checking errors in type assertions
+    check-type-assertions: true
+    # Report about assignment of errors to blank identifier
+    check-blank: true
+
+  # Style
+  gocritic:
+    enabled-tags:
+      - diagnostic
+      - performance
+      - style
+      - opinionated
+    disabled-checks:
+      - dupImport # Already covered by goimports
+      - ifElseChain # Sometimes if-else is clearer
+      - octalLiteral # We don't use octal
+      - whyNoLint # We might need nolint sometimes
+      - wrapperFunc # Too restrictive
+
+  gocyclo:
+    # Minimal cyclomatic complexity to report
+    min-complexity: 15
+
+  gocognit:
+    # Minimal cognitive complexity to report
+    min-complexity: 20
+
+  funlen:
+    lines: 100
+    statements: 50
+
+  lll:
+    line-length: 140 # Slightly more than default 120
+
+  # Performance
+  goconst:
+    min-len: 3
+    min-occurrences: 3
+
+  prealloc:
+    # Report preallocation suggestions only on simple loops
+    simple: true
+    range-loops: true
+    for-loops: true
+
+  # Best practices
+  dogsled:
+    # Maximum number of blank identifiers
+    max-blank-identifiers: 2
+
+  dupl:
+    # Minimum lines to consider as duplicate
+    threshold: 150
+
+  godox:
+    keywords:
+      - TODO
+      - FIXME
+      - BUG
+      - HACK
+      - XXX
+
+issues:
+  # Excluding configuration per-path, per-linter, per-text and per-source
+  exclude-rules:
+    # Exclude some linters from running on tests files
+    - path: _test\.go
+      linters:
+        - gocyclo
+        - errcheck
+        - dupl
+        - gosec
+        - funlen
+
+    # Exclude known issues in main.go (legacy code)
+    - path: cmd/rxtls/main.go
+      linters:
+        - funlen
+        - gocyclo
+        - gocognit
+
+    # Allow TODO comments in certain files
+    - path: "(.*)?TODO(.*)?go"
+      linters:
+        - godox
+
+    # Exclude vendor, if any
+    - path: vendor/
+      linters: [all]
+
+  # Maximum issues count per one linter
+  max-issues-per-linter: 50
+
+  # Maximum count of issues with the same text
+  max-same-issues: 3
+
+  # Show only new issues
+  new: false
+
+severity:
+  # Default value is empty string
+  default-severity: warning
+  
+  # If set to true, the severity-rules regular expressions become case-sensitive
+  case-sensitive: false
+  
+  rules:
+    - linters:
+        - gosec
+      severity: error
+    - linters:
+        - staticcheck
+        - errcheck
+        - bodyclose
+      severity: error
+    - linters:
+        - revive
+        - govet
+      severity: warning
