@@ -228,16 +228,15 @@ docker_manifests:
 
 # Homebrew tap configuration
 brews:
-  - tap:
+  - repository:
       owner: x-stp
       name: homebrew-rxtls
     
-    # Folder inside the repository to put the formula
-    folder: Formula
+    # Directory inside the repository to put the formula
+    directory: Formula
     
-    # Binaries to install
-    ids:
-      - rxtls
+    # Formula name
+    name: rxtls
     
     # Homepage
     homepage: "https://github.com/x-stp/rxtls"
