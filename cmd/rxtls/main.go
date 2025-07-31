@@ -191,7 +191,7 @@ func main() {
 		defer scheduler.Shutdown()
 
 		// Process CT log
-		if err := processCTLog(*ctURI, scheduler); err != nil {
+		if err := processCTLog(ctx, *ctURI, scheduler); err != nil {
 			log.Fatalf("Error processing CT log: %v", err)
 		}
 
@@ -206,7 +206,7 @@ func main() {
 	}
 }
 
-func processCTLog(uri string, scheduler *core.Scheduler) error {
+func processCTLog(ctx context.Context, uri string, scheduler *core.Scheduler) error {
 	// Create log info
 	logInfo := &certlib.CTLogInfo{
 		URL: uri,
@@ -223,9 +223,9 @@ func processCTLog(uri string, scheduler *core.Scheduler) error {
 		end := min(start+batchSize, int(logInfo.TreeSize))
 
 		// Submit work for this batch
-		err := scheduler.SubmitWork(context.Background(), logInfo, int64(start), int64(end), func(item *core.WorkItem) error {
+		err := scheduler.SubmitWork(ctx, logInfo, int64(start), int64(end), func(ctx context.Context, item *core.WorkItem) error {
 			// Process entries in this batch
-			entries, err := certlib.DownloadEntries(context.Background(), logInfo, int(item.Start), int(item.End))
+			entries, err := certlib.DownloadEntries(ctx, logInfo, int(item.Start), int(item.End))
 			if err != nil {
 				return err
 			}
@@ -303,11 +303,11 @@ func listLogs() {
 	}
 
 	// Display each log
-	for _, log := range logs {
-		fmt.Printf("%s\n", log.Description)
-		fmt.Printf("    \\- URL:            %s\n", log.URL)
-		fmt.Printf("    \\- Owner:          %s\n", log.OperatedBy)
-		fmt.Printf("    \\- State:          %s\n", getLogState(log))
+	for _, logEntry := range logs { // Renamed log to logEntry to avoid conflict with log package
+		fmt.Printf("%s\n", logEntry.Description)
+		fmt.Printf("    \\- URL:            %s\n", logEntry.URL)
+		fmt.Printf("    \\- Owner:          %s\n", logEntry.OperatedBy)
+		fmt.Printf("    \\- State:          %s\n", getLogState(logEntry))
 		fmt.Println()
 	}
 
@@ -315,17 +315,17 @@ func listLogs() {
 	fmt.Printf("Found %d Certificate Transparency Logs\n", len(logs))
 }
 
-func getLogState(log certlib.CTLogInfo) string {
+func getLogState(logInfo certlib.CTLogInfo) string { // Renamed log to logInfo
 	// Get log info to determine state
-	if err := certlib.GetLogInfo(&log); err != nil {
+	if err := certlib.GetLogInfo(&logInfo); err != nil {
 		return "Unknown (error getting info)"
 	}
 
-	if log.TreeSize == 0 {
+	if logInfo.TreeSize == 0 {
 		return "Empty"
 	}
 
-	return fmt.Sprintf("Active (%d certificates)", log.TreeSize)
+	return fmt.Sprintf("Active (%d certificates)", logInfo.TreeSize)
 }
 
 // downloadLogs is the handler for the 'download' command.
@@ -409,9 +409,9 @@ func downloadLogs(outputDir string, maxConcurrentLogs int, bufferSize int, showS
 	}
 
 	// 4. Create and Run the Download Manager
-	downloader, err := core.NewDownloadManager(ctx, config)
-	if err != nil {
-		log.Fatalf("Failed to create download manager: %v", err)
+	downloader, errManager := core.NewDownloadManager(ctx, config) // Renamed err to errManager
+	if errManager != nil {
+		log.Fatalf("Failed to create download manager: %v", errManager)
 	}
 
 	// 5. Launch Stats Display Goroutine (if enabled)
@@ -420,13 +420,12 @@ func downloadLogs(outputDir string, maxConcurrentLogs int, bufferSize int, showS
 		statsWg.Add(1)
 		go func() {
 			defer statsWg.Done()
-			displayDownloadStats(downloader, ctx)
+			displayDownloadStats(ctx, downloader) // Swapped order
 		}()
 	}
 
 	// 6. Start Download Process (BLOCKING)
-	err = downloader.DownloadCertificates(selectedLogs)
-	if err != nil && !errors.Is(err, context.Canceled) {
+	if err := downloader.DownloadCertificates(selectedLogs); err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, core.ErrDownloadCancelled) {
 		log.Printf("Error during certificate download: %v", err)
 	}
 	log.Println("Main download process finished or cancelled.")
@@ -444,7 +443,8 @@ func downloadLogs(outputDir string, maxConcurrentLogs int, bufferSize int, showS
 }
 
 // displayDownloadStats periodically shows download progress.
-func displayDownloadStats(downloader *core.DownloadManager, ctx context.Context) {
+// ctx should be the first parameter for consistency with Go conventions.
+func displayDownloadStats(ctx context.Context, downloader *core.DownloadManager) {
 	ticker := time.NewTicker(time.Second * 2)
 	defer ticker.Stop()
 	startTime := downloader.GetStats().StartTime
@@ -465,7 +465,7 @@ func displayDownloadStats(downloader *core.DownloadManager, ctx context.Context)
 			if totalEntries > 0 {
 				percentDone = float64(processedEntries+failedEntries) / float64(totalEntries) * 100
 			}
-			fmt.Printf("\rProcessed: %d/%d logs | Entries: %d / ~%d (%.1f%%) | Failed: %d | Rate: %.0f ent/s | Written: %.2fMB",
+			fmt.Printf("\rProcessed: %d/%d logs | Entries: %d / ~%d (%.1f%%) | Failed: %d | Rate: %.0f ent/s | Written: %.2fMB | Retries: %.2f%%",
 				stats.ProcessedLogs.Load(),
 				stats.TotalLogs.Load(),
 				processedEntries,
@@ -474,6 +474,7 @@ func displayDownloadStats(downloader *core.DownloadManager, ctx context.Context)
 				failedEntries,
 				entriesPerSec,
 				float64(stats.OutputBytesWritten.Load())/(1024*1024),
+				stats.GetRetryRate()*100,
 			)
 		case <-ctx.Done():
 			fmt.Println("\nDownload stats display stopping.")
@@ -491,17 +492,21 @@ func displayFinalDownloadStats(downloader *core.DownloadManager) {
 	if elapsed.Seconds() > 0 {
 		rate = float64(processedEntries) / elapsed.Seconds()
 	}
-	fmt.Println()
+	fmt.Println() // Ensure stats start on a new line
 	fmt.Printf("\n--- Final Download Statistics ---\n")
 	fmt.Printf(" Processing Time: %v\n", elapsed.Round(time.Millisecond))
 	fmt.Printf("   Total Logs: %d\n", stats.TotalLogs.Load())
 	fmt.Printf(" Processed Logs: %d\n", stats.ProcessedLogs.Load())
 	fmt.Printf("    Failed Logs: %d\n", stats.FailedLogs.Load())
 	fmt.Printf("  Total Entries: ~%d\n", stats.TotalEntries.Load())
-	fmt.Printf("Processed Entries: %d\n", processedEntries)
+	fmt.Printf("Processed Entries: %d (%.2f%% first try)\n",
+		processedEntries,
+		float64(stats.SuccessFirstTry.Load())/float64(processedEntries+1)*100) // +1 to avoid div by zero if no entries
 	fmt.Printf("   Failed Entries: %d\n", stats.FailedEntries.Load())
+	fmt.Printf("     Overall Rate: %.0f entries/sec\n", rate)
+	fmt.Printf("       Retry Rate: %.2f%% (Total Retries: %d)\n",
+		stats.GetRetryRate()*100, stats.RetryCount.Load())
 	fmt.Printf("   Output Written: %.2f MB\n", float64(stats.OutputBytesWritten.Load())/(1024*1024))
-	fmt.Printf("     Average Rate: %.0f entries/sec\n", rate)
 	fmt.Printf("-------------------------------\n")
 }
 
@@ -583,14 +588,12 @@ func extractDomains(outputDir string, maxConcurrentLogs int, bufferSize int, sho
 		sig := <-sigChan
 		log.Printf("Received signal %v, initiating shutdown...", sig)
 		cancel() // Cancel context first
-		// TODO: Need a way to signal the extractor to shutdown gracefully beyond just context.
-		// extractor.Shutdown() // This would ideally be called here if available
 	}()
 
 	// 5. Create the Domain Extractor
-	extractor, err := core.NewDomainExtractor(ctx, config)
-	if err != nil {
-		log.Fatalf("Failed to create domain extractor: %v", err)
+	extractor, errManager := core.NewDomainExtractor(ctx, config) // Renamed err
+	if errManager != nil {
+		log.Fatalf("Failed to create domain extractor: %v", errManager)
 	}
 
 	// 6. Launch Stats Display Goroutine (if enabled)
@@ -599,14 +602,13 @@ func extractDomains(outputDir string, maxConcurrentLogs int, bufferSize int, sho
 		statsWg.Add(1)
 		go func() {
 			defer statsWg.Done()
-			displayDomainStats(extractor, ctx) // Pass extractor's context
+			displayDomainStats(ctx, extractor) // Swapped order
 		}()
 	}
 
 	// 7. Start Domain Extraction Process (BLOCKING CALL)
 	log.Printf("Starting extraction for %d selected logs...", len(selectedLogs))
-	err = extractor.ExtractDomainsToCSV(selectedLogs)
-	if err != nil && !errors.Is(err, context.Canceled) {
+	if err := extractor.ExtractDomainsToCSV(selectedLogs); err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, core.ErrDownloadCancelled) {
 		// Log error unless it was just context cancellation
 		log.Printf("Error during domain extraction: %v", err)
 	}
@@ -628,7 +630,8 @@ func extractDomains(outputDir string, maxConcurrentLogs int, bufferSize int, sho
 }
 
 // displayDomainStats periodically shows domain extraction progress.
-func displayDomainStats(extractor *core.DomainExtractor, ctx context.Context) {
+// ctx should be the first parameter for consistency with Go conventions.
+func displayDomainStats(ctx context.Context, extractor *core.DomainExtractor) {
 	ticker := time.NewTicker(time.Second * 2) // Update every 2 seconds
 	defer ticker.Stop()
 	startTime := extractor.GetStats().StartTime
@@ -655,7 +658,7 @@ func displayDomainStats(extractor *core.DomainExtractor, ctx context.Context) {
 			}
 
 			// Use carriage return to update the line in place
-			fmt.Printf("\rProcessed: %d/%d logs | Entries: %d / ~%d (%.1f%%) | Failed: %d | Rate: %.0f ent/s | Domains: %d",
+			fmt.Printf("\rProcessed: %d/%d logs | Entries: %d / ~%d (%.1f%%) | Failed: %d | Rate: %.0f ent/s | Domains: %d | Retries: %.2f%%",
 				stats.ProcessedLogs.Load(),
 				stats.TotalLogs.Load(),
 				processedEntries,
@@ -664,6 +667,7 @@ func displayDomainStats(extractor *core.DomainExtractor, ctx context.Context) {
 				failedEntries,
 				entriesPerSec,
 				stats.TotalDomainsFound.Load(),
+				stats.GetRetryRate()*100, // Assuming DomainExtractorStats also gets GetRetryRate
 			)
 		case <-ctx.Done(): // Use the passed context
 			fmt.Println("\nStats display stopping due to context cancellation.")
@@ -690,19 +694,17 @@ func displayFinalDomainStats(extractor *core.DomainExtractor) {
 	fmt.Printf(" Processed Logs: %d\n", stats.ProcessedLogs.Load())
 	fmt.Printf("    Failed Logs: %d\n", stats.FailedLogs.Load())
 	fmt.Printf("  Total Entries: ~%d\n", stats.TotalEntries.Load())
-	fmt.Printf("Processed Entries: %d\n", processedEntries)
+	fmt.Printf("Processed Entries: %d (%.2f%% first try)\n",
+		processedEntries,
+		float64(stats.SuccessFirstTry.Load())/float64(processedEntries+1)*100) // Assuming DomainExtractorStats has SuccessFirstTry
 	fmt.Printf("   Failed Entries: %d\n", stats.FailedEntries.Load())
 	fmt.Printf("   Total Domains: %d\n", stats.TotalDomainsFound.Load())
+	fmt.Printf("  Overall Rate: %.0f entries/sec\n", rate)
+	fmt.Printf("    Retry Rate: %.2f%% (Total Retries: %d)\n",
+		stats.GetRetryRate()*100, stats.RetryCount.Load()) // Assuming DomainExtractorStats has GetRetryRate and RetryCount
 	fmt.Printf("   Output Written: %.2f MB\n", float64(stats.OutputBytesWritten.Load())/(1024*1024))
-	fmt.Printf("     Average Rate: %.0f entries/sec\n", rate)
 	fmt.Printf("----------------------------------------\n")
 }
-
-// Commented out old/unused stats functions
-/*
-func displayStats(engine *core.Engine) { ... }
-func displayFinalStats(engine *core.Engine) { ... }
-*/
 
 // fetchAndSaveLogs fetches the CT logs list and saves it to a local file.
 func fetchAndSaveLogs() {
@@ -711,6 +713,7 @@ func fetchAndSaveLogs() {
 	// Temporarily disable UseLocalLogs to force fetching from remote
 	oldUseLocalLogs := certlib.UseLocalLogs
 	certlib.UseLocalLogs = false
+	defer func() { certlib.UseLocalLogs = oldUseLocalLogs }() // Ensure it's restored
 
 	// Use the client package to fetch the logs list directly
 	httpClient := client.GetHTTPClient()
@@ -721,7 +724,7 @@ func fetchAndSaveLogs() {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		log.Fatalf("HTTP error %d fetching log list", resp.StatusCode)
+		log.Fatalf("HTTP error %d fetching log list (%s)", resp.StatusCode, certlib.CTLListsURL)
 	}
 
 	body, err := io.ReadAll(resp.Body)
@@ -731,23 +734,33 @@ func fetchAndSaveLogs() {
 
 	// Save the response to the specified file
 	if err := os.WriteFile(logsFile, body, 0644); err != nil {
-		log.Fatalf("Error saving logs to file: %v", err)
+		log.Fatalf("Error saving logs to file '%s': %v", logsFile, err)
 	}
 
 	log.Printf("Successfully saved CT logs list to %s", logsFile)
 
-	// Now try to parse and count the logs
-	tempLocalLogsFile := certlib.LocalLogsFile
-	certlib.LocalLogsFile = logsFile
-	certlib.UseLocalLogs = true
-	logs, err := core.ListCTLogs()
+	// Now try to parse and count the logs from the newly saved file.
+	// This also serves as a basic validation of the saved file content.
+	tempOriginalLocalLogsFile := certlib.LocalLogsFile // Save original for restoration
+	certlib.LocalLogsFile = logsFile                   // Temporarily point certlib to the new file
+	certlib.UseLocalLogs = true                        // Force use of this local file
+
+	logs, err := core.ListCTLogs() // This will now use the new file.
 	if err != nil {
-		log.Printf("Warning: Saved logs file but had error parsing it: %v", err)
+		log.Printf("Warning: Saved logs file to '%s' but encountered an error parsing it: %v", logsFile, err)
 	} else {
-		log.Printf("Successfully parsed %d CT logs from the saved file", len(logs))
+		log.Printf("Successfully parsed %d CT logs from the saved file '%s'.", len(logs), logsFile)
 	}
 
-	// Restore the original values
-	certlib.UseLocalLogs = oldUseLocalLogs
-	certlib.LocalLogsFile = tempLocalLogsFile
+	// Restore the original certlib settings.
+	certlib.LocalLogsFile = tempOriginalLocalLogsFile
+	certlib.UseLocalLogs = oldUseLocalLogs // Restore original UseLocalLogs setting
+}
+
+// Helper to find min of two integers (for batching end index calculation)
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
