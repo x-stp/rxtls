@@ -170,19 +170,17 @@ docker_manifests:
       - 'ghcr.io/x-stp/{{ .ProjectName }}:latest-amd64'
       - 'ghcr.io/x-stp/{{ .ProjectName }}:latest-arm64'
 
-brews:
+homebrew_casks:
   - repository:
       owner: x-stp
       name: homebrew-rxtls
-    directory: Formula
     name: rxtls
+    directory: Casks
     homepage: 'https://github.com/x-stp/rxtls'
     description: 'High-Performance Certificate Transparency Processor'
     license: 'AGPL-3.0'
-    install: |
-      bin.install "rxtls"
-    test: |
-      system "#{bin}/rxtls", "--version"
+    conflicts:
+      - formula: rxtls
 
 nfpms:
   - id: rxtls
