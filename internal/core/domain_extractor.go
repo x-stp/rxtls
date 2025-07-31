@@ -157,6 +157,10 @@ type DomainExtractorStats struct {
 	// StartTime records the time when the domain extraction process was initiated.
 	// Used to calculate overall processing duration.
 	StartTime time.Time
+	// RetryCount is the count of retried blocks during domain extraction
+	RetryCount atomic.Int64
+	// SuccessFirstTry is the count of blocks successful on first try
+	SuccessFirstTry atomic.Int64
 }
 
 // GetStartTime returns the StartTime of the extraction process.
@@ -185,6 +189,14 @@ func (s *DomainExtractorStats) GetTotalDomainsFound() int64 { return s.TotalDoma
 
 // GetOutputBytesWritten returns the total bytes written to output files.
 func (s *DomainExtractorStats) GetOutputBytesWritten() int64 { return s.OutputBytesWritten.Load() }
+
+// GetRetryRate returns the retry rate as a fraction of processed entries
+func (s *DomainExtractorStats) GetRetryRate() float64 {
+	if s.ProcessedEntries.Load() == 0 {
+		return 0
+	}
+	return float64(s.RetryCount.Load()) / float64(s.ProcessedEntries.Load())
+}
 
 // NewDomainExtractor creates and initializes a new DomainExtractor instance.
 // It requires a parent context (for overall cancellation) and a DomainExtractorConfig.
@@ -558,6 +570,12 @@ func (de *DomainExtractor) submitDomainExtractionBlock(ctx context.Context, ctlo
 func (de *DomainExtractor) domainExtractorCallback(item *WorkItem) error {
 	startTime := time.Now() // Start timer for overall block processing.
 
+	// Track retries
+	isRetry := item.Attempt > 0
+	if isRetry {
+		de.stats.RetryCount.Add(1)
+	}
+
 	// 1. Fetch Entries.
 	logInfo := item.LogInfo
 	if logInfo == nil {
@@ -675,6 +693,11 @@ func (de *DomainExtractor) domainExtractorCallback(item *WorkItem) error {
 	de.stats.ProcessedEntries.Add(successfullyProcessedInBlock)
 	de.stats.TotalDomainsFound.Add(domainsFoundInBlock)
 	de.stats.OutputBytesWritten.Add(int64(bytesWritten))
+
+	// Track first-attempt success
+	if !isRetry {
+		de.stats.SuccessFirstTry.Add(1)
+	}
 
 	// Optional: More detailed performance logging per block for debugging.
 	log.Printf("[Worker] Finished block %s (%d-%d): Entries=%d, ParsedOK=%d, FailedParse=%d, Domains=%d. Times: Total=%v (Down:%v, ProcLoop:%v, Write:%v)",
