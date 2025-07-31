@@ -64,7 +64,8 @@ builds:
 
 # Archive configuration
 archives:
-  - id: rxtls
+  - ids:
+      - rxtls
     name_template: >-
       {{ .ProjectName }}_
       {{- .Version }}_
@@ -162,11 +163,14 @@ release:
   # Name template
   name_template: "{{ .Tag }}"
 
-# Docker configuration
+# Docker configuration with multi-arch support
 dockers:
   - image_templates:
-      - "ghcr.io/x-stp/rxtls:{{ .Tag }}"
-      - "ghcr.io/x-stp/rxtls:latest"
+      - "ghcr.io/x-stp/rxtls:{{ .Tag }}-amd64"
+      - "ghcr.io/x-stp/rxtls:{{ .Tag }}-arm64"
+    
+    # Use specific binary
+    use: buildx
     
     # Build context
     goos: linux
@@ -185,18 +189,55 @@ dockers:
       - "--label=org.opencontainers.image.source=https://github.com/x-stp/rxtls"
       - "--label=org.opencontainers.image.licenses=AGPL-3.0"
       - "--platform=linux/amd64"
+  
+  - image_templates:
+      - "ghcr.io/x-stp/rxtls:{{ .Tag }}-arm64"
+    
+    # Use specific binary
+    use: buildx
+    
+    # Build context
+    goos: linux
+    goarch: arm64
+    
+    # Dockerfile
+    dockerfile: Dockerfile
+    
+    # Build flags
+    build_flag_templates:
+      - "--pull"
+      - "--label=org.opencontainers.image.created={{.Date}}"
+      - "--label=org.opencontainers.image.title={{.ProjectName}}"
+      - "--label=org.opencontainers.image.revision={{.FullCommit}}"
+      - "--label=org.opencontainers.image.version={{.Version}}"
+      - "--label=org.opencontainers.image.source=https://github.com/x-stp/rxtls"
+      - "--label=org.opencontainers.image.licenses=AGPL-3.0"
+      - "--platform=linux/arm64"
+
+# Docker manifest for multi-arch support
+docker_manifests:
+  - name_template: "ghcr.io/x-stp/rxtls:{{ .Tag }}"
+    image_templates:
+      - "ghcr.io/x-stp/rxtls:{{ .Tag }}-amd64"
+      - "ghcr.io/x-stp/rxtls:{{ .Tag }}-arm64"
+  
+  - name_template: "ghcr.io/x-stp/rxtls:latest"
+    image_templates:
+      - "ghcr.io/x-stp/rxtls:{{ .Tag }}-amd64"
+      - "ghcr.io/x-stp/rxtls:{{ .Tag }}-arm64"
 
 # Homebrew tap configuration
 brews:
-  - repository:
+  - tap:
       owner: x-stp
       name: homebrew-rxtls
     
     # Folder inside the repository to put the formula
     folder: Formula
     
-    # Formula name
-    name: rxtls
+    # Binaries to install
+    ids:
+      - rxtls
     
     # Homepage
     homepage: "https://github.com/x-stp/rxtls"

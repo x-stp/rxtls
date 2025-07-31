@@ -1,5 +1,10 @@
-# Build stage
-FROM golang:1.21-alpine AS builder
+# Build stage with multi-arch support
+FROM --platform=$BUILDPLATFORM golang:1.21-alpine AS builder
+
+# Build arguments for cross-compilation
+ARG TARGETOS
+ARG TARGETARCH
+ARG TARGETVARIANT
 
 # Install git and ca-certificates
 RUN apk add --no-cache git ca-certificates
@@ -16,13 +21,13 @@ RUN go mod download
 # Copy source code
 COPY . .
 
-# Build the binary
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
+# Build the binary for target architecture
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build \
     -ldflags="-w -s" \
     -o rxtls \
     ./cmd/rxtls
 
-# Final stage
+# Final stage - use scratch for minimal image
 FROM scratch
 
 # Copy ca-certificates from builder

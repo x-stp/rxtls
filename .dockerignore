@@ -1,0 +1,33 @@
+# Git files
+.git
+.gitignore
+
+# Documentation
+*.md
+docs/
+LICENSE
+
+# Build artifacts
+dist/
+*.exe
+rxtls
+
+# Development files
+.goreleaser.yaml
+.golangci.yml
+Makefile
+.github/
+
+# Test files
+*_test.go
+testdata/
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
