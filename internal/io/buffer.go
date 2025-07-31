@@ -437,8 +437,8 @@ func (ab *AsyncBuffer) WaitForBackpressure(ctx context.Context) error {
 }
 
 // GetMetrics returns the current metrics for the buffer
-func (ab *AsyncBuffer) GetMetrics() BufferMetrics {
-	return ab.metrics
+func (ab *AsyncBuffer) GetMetrics() *BufferMetrics {
+	return &ab.metrics
 }
 
 // BufferPool manages a pool of AsyncBuffers

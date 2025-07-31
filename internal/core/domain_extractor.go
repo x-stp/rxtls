@@ -490,7 +490,8 @@ func (de *DomainExtractor) processSingleLogForDomains(ctlog *certlib.CTLogInfo) 
 // for domain extraction to the scheduler, including rate limiting and retries on submission failure.
 func (de *DomainExtractor) submitDomainExtractionBlock(ctx context.Context, ctlog *certlib.CTLogInfo, start, end int64) error {
 	// Determine target worker based on log URL for consistent sharding.
-	shardIndex := int(xxh3.HashString(ctlog.URL) % uint64(de.scheduler.numWorkers))
+	hash := xxh3.HashString(ctlog.URL)
+	shardIndex := int(hash % uint64(de.scheduler.numWorkers))
 	targetWorker := de.scheduler.workers[shardIndex]
 
 	// Wait on the worker's specific rate limiter.

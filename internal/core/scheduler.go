@@ -248,7 +248,8 @@ func (s *Scheduler) SubmitWork(ctx context.Context, logInfo *certlib.CTLogInfo, 
 	logURL := logInfo.URL // Cache for local use, as logInfo might be a pointer to changing data if not careful.
 	// Determine the target worker using consistent hashing of the log URL.
 	// This aims to direct work for the same log to the same worker.
-	shardIndex := int(xxh3.HashString(logURL) % uint64(s.numWorkers))
+	hash := xxh3.HashString(logURL)
+	shardIndex := int(hash % uint64(s.numWorkers))
 	targetWorker := s.workers[shardIndex]
 
 	// Log current rate limit before attempting to use it (for debugging/monitoring).

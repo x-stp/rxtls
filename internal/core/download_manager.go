@@ -99,16 +99,34 @@ type DownloadStats struct {
 	SuccessFirstTry    atomic.Int64 // Count of blocks successful on first try
 }
 
-// Implement PeriodicStats + FinalStats interface for DownloadStats
-func (s *DownloadStats) GetStartTime() time.Time      { return s.StartTime }
-func (s *DownloadStats) GetTotalLogs() int64          { return s.TotalLogs.Load() }
-func (s *DownloadStats) GetProcessedLogs() int64      { return s.ProcessedLogs.Load() }
-func (s *DownloadStats) GetFailedLogs() int64         { return s.FailedLogs.Load() }
-func (s *DownloadStats) GetTotalEntries() int64       { return s.TotalEntries.Load() }
-func (s *DownloadStats) GetProcessedEntries() int64   { return s.ProcessedEntries.Load() }
-func (s *DownloadStats) GetFailedEntries() int64      { return s.FailedEntries.Load() }
+// GetStartTime returns the start time of the download process
+func (s *DownloadStats) GetStartTime() time.Time { return s.StartTime }
+
+// GetTotalLogs returns the total number of logs being processed
+func (s *DownloadStats) GetTotalLogs() int64 { return s.TotalLogs.Load() }
+
+// GetProcessedLogs returns the number of logs successfully processed
+func (s *DownloadStats) GetProcessedLogs() int64 { return s.ProcessedLogs.Load() }
+
+// GetFailedLogs returns the number of logs that failed processing
+func (s *DownloadStats) GetFailedLogs() int64 { return s.FailedLogs.Load() }
+
+// GetTotalEntries returns the total number of entries to be processed
+func (s *DownloadStats) GetTotalEntries() int64 { return s.TotalEntries.Load() }
+
+// GetProcessedEntries returns the number of entries successfully processed
+func (s *DownloadStats) GetProcessedEntries() int64 { return s.ProcessedEntries.Load() }
+
+// GetFailedEntries returns the number of entries that failed processing
+func (s *DownloadStats) GetFailedEntries() int64 { return s.FailedEntries.Load() }
+
+// GetOutputBytesWritten returns the total bytes written to output files
 func (s *DownloadStats) GetOutputBytesWritten() int64 { return s.OutputBytesWritten.Load() }
-func (s *DownloadStats) GetTotalDomainsFound() int64  { return 0 } // Not applicable
+
+// GetTotalDomainsFound returns the total domains found (not applicable for download stats)
+func (s *DownloadStats) GetTotalDomainsFound() int64 { return 0 }
+
+// GetRetryRate returns the retry rate as a fraction of processed entries
 func (s *DownloadStats) GetRetryRate() float64 {
 	if s.ProcessedEntries.Load() == 0 {
 		return 0
@@ -461,7 +479,8 @@ func (dm *DownloadManager) processSingleLogForDownload(ctlog *certlib.CTLogInfo)
 // submitDownloadBlock attempts to submit a work block with retries
 func (dm *DownloadManager) submitDownloadBlock(ctx context.Context, ctlog *certlib.CTLogInfo, start, end int64) error {
 	// Determine target worker based on log URL (consistent sharding)
-	shardIndex := int(xxh3.HashString(ctlog.URL) % uint64(dm.scheduler.numWorkers))
+	hash := xxh3.HashString(ctlog.URL)
+	shardIndex := int(hash % uint64(dm.scheduler.numWorkers))
 	targetWorker := dm.scheduler.workers[shardIndex]
 
 	// Wait on rate limiter

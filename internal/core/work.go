@@ -1,7 +1,5 @@
-/*
-Package core provides the central logic for rxtls, including the scheduler, download manager,
-and domain extractor. It defines common data structures and constants used across these components.
-*/
+// Package core provides the central logic for rxtls, including the scheduler, download manager,
+// and domain extractor. It defines common data structures and constants used across these components.
 package core
 
 import (

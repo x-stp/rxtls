@@ -169,7 +169,8 @@ func (s *Scheduler) SubmitWork(ctx context.Context, logInfo *certlib.CTLogInfo, 
 	}
 
 	logURL := logInfo.URL
-	shardIndex := int(xxh3.HashString(logURL) % uint64(s.numWorkers))
+	hash := xxh3.HashString(logURL)
+	shardIndex := int(hash % uint64(s.numWorkers))
 	targetWorker := s.workers[shardIndex]
 
 	// NOTE: Rate limiting handled by caller
