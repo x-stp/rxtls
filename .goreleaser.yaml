@@ -1,0 +1,260 @@
+# GoReleaser configuration for rxtls
+# Make sure to check the documentation at https://goreleaser.com
+
+version: 2
+
+# Global environment variables
+env:
+  - GO111MODULE=on
+  - CGO_ENABLED=0
+
+# Before hooks
+before:
+  hooks:
+    - go mod tidy
+    - go mod download
+
+# Build configuration
+builds:
+  - id: rxtls
+    main: ./cmd/rxtls
+    binary: rxtls
+    
+    # Build for multiple platforms
+    goos:
+      - linux
+      - windows
+      - darwin
+      - freebsd
+    
+    goarch:
+      - amd64
+      - arm64
+      - arm
+      - 386
+    
+    goarm:
+      - "6"
+      - "7"
+    
+    # Exclude certain combinations
+    ignore:
+      - goos: windows
+        goarch: arm
+      - goos: windows
+        goarch: arm64
+      - goos: darwin
+        goarch: 386
+      - goos: darwin
+        goarch: arm
+      - goos: freebsd
+        goarch: arm
+    
+    # Build flags
+    flags:
+      - -trimpath
+    
+    # Ldflags to reduce binary size and inject version info
+    ldflags:
+      - -s -w
+      - -X main.version={{.Version}}
+      - -X main.commit={{.Commit}}
+      - -X main.date={{.Date}}
+      - -X main.builtBy=goreleaser
+
+# Archive configuration
+archives:
+  - id: rxtls
+    name_template: >-
+      {{ .ProjectName }}_
+      {{- .Version }}_
+      {{- .Os }}_
+      {{- if eq .Arch "amd64" }}x86_64
+      {{- else if eq .Arch "386" }}i386
+      {{- else }}{{ .Arch }}{{ end }}
+      {{- if .Arm }}v{{ .Arm }}{{ end }}
+    
+    # Archive format
+    format_overrides:
+      - goos: windows
+        format: zip
+    
+    # Files to include in the archive
+    files:
+      - LICENSE
+      - README.md
+      - CHANGELOG.md
+
+# Checksum configuration
+checksum:
+  name_template: "{{ .ProjectName }}_{{ .Version }}_checksums.txt"
+  algorithm: sha256
+
+# Snapshot configuration
+snapshot:
+  name_template: "{{ incpatch .Version }}-dev"
+
+# Changelog configuration
+changelog:
+  sort: asc
+  use: github
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+      - "typo"
+      - "Merge pull request"
+      - "Merge branch"
+  groups:
+    - title: "New Features"
+      regexp: '^.*?feat(\([[:word:]]+\))??!?:.+$'
+      order: 0
+    - title: "Bug Fixes"
+      regexp: '^.*?fix(\([[:word:]]+\))??!?:.+$'
+      order: 1
+    - title: "Performance Improvements"
+      regexp: '^.*?perf(\([[:word:]]+\))??!?:.+$'
+      order: 2
+    - title: "Code Refactoring"
+      regexp: '^.*?refactor(\([[:word:]]+\))??!?:.+$'
+      order: 3
+    - title: Other
+      order: 999
+
+# Release configuration
+release:
+  github:
+    owner: x-stp
+    name: rxtls
+  
+  # Release notes
+  header: |
+    ## rxtls {{ .Tag }}
+    
+    High-Performance Certificate Transparency Processor
+  
+  footer: |
+    ## Installation
+    
+    ### Binary
+    Download the appropriate binary for your platform from the assets below.
+    
+    ### Homebrew (macOS/Linux)
+    ```bash
+    brew tap x-stp/rxtls
+    brew install rxtls
+    ```
+    
+    ### Docker
+    ```bash
+    docker pull ghcr.io/x-stp/rxtls:{{ .Tag }}
+    ```
+    
+    **Full documentation**: https://github.com/x-stp/rxtls#readme
+  
+  # Prerelease settings
+  prerelease: auto
+  
+  # Draft release
+  draft: false
+  
+  # Name template
+  name_template: "{{ .Tag }}"
+
+# Docker configuration
+dockers:
+  - image_templates:
+      - "ghcr.io/x-stp/rxtls:{{ .Tag }}"
+      - "ghcr.io/x-stp/rxtls:latest"
+    
+    # Build context
+    goos: linux
+    goarch: amd64
+    
+    # Dockerfile
+    dockerfile: Dockerfile
+    
+    # Build flags
+    build_flag_templates:
+      - "--pull"
+      - "--label=org.opencontainers.image.created={{.Date}}"
+      - "--label=org.opencontainers.image.title={{.ProjectName}}"
+      - "--label=org.opencontainers.image.revision={{.FullCommit}}"
+      - "--label=org.opencontainers.image.version={{.Version}}"
+      - "--label=org.opencontainers.image.source=https://github.com/x-stp/rxtls"
+      - "--label=org.opencontainers.image.licenses=AGPL-3.0"
+      - "--platform=linux/amd64"
+
+# Homebrew tap configuration
+brews:
+  - repository:
+      owner: x-stp
+      name: homebrew-rxtls
+    
+    # Folder inside the repository to put the formula
+    folder: Formula
+    
+    # Formula name
+    name: rxtls
+    
+    # Homepage
+    homepage: "https://github.com/x-stp/rxtls"
+    
+    # Description
+    description: "High-Performance Certificate Transparency Processor"
+    
+    # License
+    license: "AGPL-3.0"
+    
+    # Dependencies
+    dependencies:
+      - name: go
+        type: build
+    
+    # Installation instructions
+    install: |
+      bin.install "rxtls"
+    
+    # Test block
+    test: |
+      system "#{bin}/rxtls", "--version"
+
+# NFPM configuration for Linux packages
+nfpms:
+  - id: rxtls
+    package_name: rxtls
+    
+    # Formats
+    formats:
+      - deb
+      - rpm
+      - apk
+    
+    # Package information
+    vendor: "x-stp"
+    homepage: "https://github.com/x-stp/rxtls"
+    maintainer: "Pepijn van der Stap <rxtls@vanderstap.info>"
+    description: "High-Performance Certificate Transparency Processor"
+    license: "AGPL-3.0"
+    
+    # Dependencies
+    dependencies:
+      - ca-certificates
+    
+    # Section
+    section: net
+    
+    # Priority
+    priority: optional
+    
+    # Contents
+    contents:
+      - src: ./LICENSE
+        dst: /usr/share/doc/rxtls/LICENSE
+      - src: ./README.md
+        dst: /usr/share/doc/rxtls/README.md
+
+# Announce configuration
+announce:
+  skip: false

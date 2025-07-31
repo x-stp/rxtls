@@ -1,2 +1,21 @@
 output/certs/*
 output/domains/*
+
+# GoReleaser artifacts
+dist/
+*.snap
+
+# Binary
+rxtls
+
+# IDE
+.vscode/
+.idea/
+
+# Test coverage
+*.out
+coverage.html
+
+# Temporary files
+*.tmp
+*.log
