@@ -1,0 +1,12 @@
+# Dockerfile for GoReleaser
+# This is a minimal Dockerfile that only copies the pre-built binary
+FROM scratch
+
+# Copy ca-certificates for HTTPS connections
+COPY --from=alpine:latest /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
+
+# Copy the pre-built binary from GoReleaser
+COPY rxtls /usr/local/bin/rxtls
+
+# Set entrypoint
+ENTRYPOINT ["/usr/local/bin/rxtls"]
