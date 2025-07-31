@@ -41,7 +41,7 @@ archives:
     name_template: '{{ .ProjectName }}_{{ .Version }}_{{ if eq .Os "darwin" }}macOS{{ else }}{{ .Os }}{{ end }}_{{ .Arch }}{{ if .Arm }}v{{ .Arm }}{{ end }}'
     format_overrides:
       - goos: windows
-        format: zip
+        formats: [zip]
     files:
       - LICENSE
       - README.md
@@ -51,7 +51,7 @@ checksum:
   algorithm: sha256
 
 snapshot:
-  name_template: '{{ incpatch .Version }}-dev'
+  version_template: '{{ incpatch .Version }}-dev'
 
 changelog:
   sort: asc
@@ -116,7 +116,7 @@ dockers:
       - 'ghcr.io/x-stp/{{ .ProjectName }}:v{{ .Major }}.{{ .Minor }}-amd64'
       - 'ghcr.io/x-stp/{{ .ProjectName }}:v{{ .Major }}-amd64'
       - 'ghcr.io/x-stp/{{ .ProjectName }}:latest-amd64'
-    dockerfile: Dockerfile
+    dockerfile: Dockerfile.goreleaser
     use: buildx
     build_flag_templates:
       - '--pull'
@@ -135,7 +135,7 @@ dockers:
       - 'ghcr.io/x-stp/{{ .ProjectName }}:v{{ .Major }}.{{ .Minor }}-arm64'
       - 'ghcr.io/x-stp/{{ .ProjectName }}:v{{ .Major }}-arm64'
       - 'ghcr.io/x-stp/{{ .ProjectName }}:latest-arm64'
-    dockerfile: Dockerfile
+    dockerfile: Dockerfile.goreleaser
     use: buildx
     build_flag_templates:
       - '--pull'
