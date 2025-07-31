@@ -223,7 +223,7 @@ func processCTLog(ctx context.Context, uri string, scheduler *core.Scheduler) er
 		end := min(start+batchSize, int(logInfo.TreeSize))
 
 		// Submit work for this batch
-		err := scheduler.SubmitWork(ctx, logInfo, int64(start), int64(end), func(ctx context.Context, item *core.WorkItem) error {
+		err := scheduler.SubmitWork(ctx, logInfo, int64(start), int64(end), func(item *core.WorkItem) error {
 			// Process entries in this batch
 			entries, err := certlib.DownloadEntries(ctx, logInfo, int(item.Start), int(item.End))
 			if err != nil {
