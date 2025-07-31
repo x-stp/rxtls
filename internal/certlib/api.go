@@ -349,6 +349,7 @@ func DownloadEntries(ctx context.Context, ctlog *CTLogInfo, start, end int) (*En
 	if err != nil {
 		return nil, fmt.Errorf("error creating request: %w", err)
 	}
+	req.Header.Set("User-Agent", "rxtls (+https://github.com/x-stp/rxtls)")
 
 	// Make the request with retry logic
 	var resp *http.Response
