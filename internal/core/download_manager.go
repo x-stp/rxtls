@@ -596,14 +596,14 @@ func (dm *DownloadManager) downloadCallback(item *WorkItem) error {
 
 	// Get a string builder from the pool
 	sbInterface := dm.stringPool.Get()
-	sb := sbInterface.(strings.Builder)
+	sb := sbInterface.(*strings.Builder)
 	sb.Reset()
 	sb.Grow(entriesCount * 512) // Pre-allocate approximate space
 
 	// Build output in memory first
 	for i, entry := range entriesResponse.Entries {
 		certIndex := item.Start + int64(i)
-		fmt.Fprintf(&sb, "%d,%s,%s\n", certIndex, entry.LeafInput, entry.ExtraData)
+		fmt.Fprintf(sb, "%d,%s,%s\n", certIndex, entry.LeafInput, entry.ExtraData)
 	}
 
 	// Get the built string
