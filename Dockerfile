@@ -1,5 +1,5 @@
 # Build stage with multi-arch support
-FROM --platform=$BUILDPLATFORM golang:1.21-alpine AS builder
+FROM --platform=$BUILDPLATFORM golang:1.24-alpine AS builder
 
 # Build arguments for cross-compilation
 ARG TARGETOS
@@ -37,4 +37,5 @@ COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
 COPY --from=builder /build/rxtls /usr/local/bin/rxtls
 
 # Set entrypoint
+
 ENTRYPOINT ["/usr/local/bin/rxtls"]
