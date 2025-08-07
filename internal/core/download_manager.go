@@ -155,7 +155,7 @@ func NewDownloadManager(ctx context.Context, config *DownloadConfig) (*DownloadM
 		cancel:    cancel,
 		stringPool: sync.Pool{
 			New: func() interface{} {
-				return strings.Builder{}
+				return &strings.Builder{}
 			},
 		},
 	}
@@ -398,10 +398,13 @@ func (dm *DownloadManager) processSingleLogForDownload(ctlog *certlib.CTLogInfo)
 	// Store the locked writer instance
 	lw := &lockedWriter{
 		writer:    writer,
-		gzWriter:  gzWriter,
 		file:      file,
 		filePath:  tempFilePath,
 		finalPath: filePath,
+	}
+	// Only set gzWriter if compression is enabled to avoid nil interface issues
+	if dm.config.CompressOutput && gzWriter != nil {
+		lw.gzWriter = gzWriter
 	}
 	dm.outputMap.Store(ctlog.URL, lw)
 
@@ -611,7 +614,7 @@ func (dm *DownloadManager) downloadCallback(item *WorkItem) error {
 
 	// Reset and return the builder to the pool
 	sb.Reset()
-	dm.stringPool.Put(&sb)
+	dm.stringPool.Put(sb)
 
 	// Lock once for the entire write
 	lw.mu.Lock()
