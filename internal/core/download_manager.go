@@ -155,7 +155,7 @@ func NewDownloadManager(ctx context.Context, config *DownloadConfig) (*DownloadM
 		cancel:    cancel,
 		stringPool: sync.Pool{
 			New: func() interface{} {
-				return strings.Builder{}
+				return &strings.Builder{}
 			},
 		},
 	}
@@ -614,7 +614,7 @@ func (dm *DownloadManager) downloadCallback(item *WorkItem) error {
 
 	// Reset and return the builder to the pool
 	sb.Reset()
-	dm.stringPool.Put(&sb)
+	dm.stringPool.Put(sb)
 
 	// Lock once for the entire write
 	lw.mu.Lock()

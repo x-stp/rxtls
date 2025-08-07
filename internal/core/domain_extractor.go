@@ -226,7 +226,7 @@ func NewDomainExtractor(ctx context.Context, config *DomainExtractorConfig) (*Do
 		cancel:    cancel,
 		stringPool: sync.Pool{
 			New: func() interface{} {
-				return strings.Builder{}
+				return &strings.Builder{}
 			},
 		},
 		// outputMap (sync.Map) is ready for use as its zero value is a valid, empty map.
@@ -632,7 +632,7 @@ func (de *DomainExtractor) domainExtractorCallback(item *WorkItem) error {
 	// Use a strings.Builder from a sync.Pool to efficiently build the batch of CSV lines.
 	// This significantly reduces string concatenation overhead and allocations.
 	sbInterface := de.stringPool.Get()
-	sb := sbInterface.(strings.Builder) // Type assertion.
+	sb := sbInterface.(*strings.Builder) // Type assertion.
 	sb.Reset()                          // Ensure builder is clean.
 	// Pre-allocate a reasonable buffer size for the string builder.
 	// Average line length can vary, estimate ~200-500 bytes per CSV line.
