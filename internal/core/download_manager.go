@@ -398,10 +398,13 @@ func (dm *DownloadManager) processSingleLogForDownload(ctlog *certlib.CTLogInfo)
 	// Store the locked writer instance
 	lw := &lockedWriter{
 		writer:    writer,
-		gzWriter:  gzWriter,
 		file:      file,
 		filePath:  tempFilePath,
 		finalPath: filePath,
+	}
+	// Only set gzWriter if compression is enabled to avoid nil interface issues
+	if dm.config.CompressOutput && gzWriter != nil {
+		lw.gzWriter = gzWriter
 	}
 	dm.outputMap.Store(ctlog.URL, lw)
 

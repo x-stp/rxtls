@@ -421,10 +421,13 @@ func (de *DomainExtractor) processSingleLogForDomains(ctlog *certlib.CTLogInfo) 
 	// This ensures thread-safe access and proper resource management during shutdown.
 	lw := &lockedWriter{
 		writer:    writer,
-		gzWriter:  gzWriter, // Will be nil if not compressing.
 		file:      file,
 		filePath:  tempFilePath,
 		finalPath: filePath,
+	}
+	// Only set gzWriter if compression is enabled to avoid nil interface issues
+	if de.config.CompressOutput && gzWriter != nil {
+		lw.gzWriter = gzWriter
 	}
 	de.outputMap.Store(ctlog.URL, lw)
 
