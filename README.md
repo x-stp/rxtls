@@ -156,8 +156,7 @@ The following Prometheus metrics are exposed:
 
 ### Prerequisites
 
-- Go 1.21 or later
-- Make (optional, for build scripts)
+- Go 1.24 or later
 
 ### Building
 
@@ -184,3 +183,4 @@ The codebase includes comprehensive tests:
 ## License
 
 GNU Affero General Public License v3 - see LICENSE file for details
+
