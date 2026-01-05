@@ -26,7 +26,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -144,7 +143,7 @@ func NewAsyncBuffer(ctx context.Context, path string, options *AsyncBufferOption
 	flag := os.O_CREATE | os.O_WRONLY | os.O_TRUNC
 	// NOTE: O_DIRECT is intentionally not enabled. With buffered I/O (bufio.Writer) and/or gzip.Writer,
 	// direct I/O's strict alignment requirements are not satisfied and can cause EINVAL, short writes,
-	// or severe performance regressions depending on filesystem/kernel behavior.
+	// or severe perf issues depending on fs/kernel "features".
 
 	file, err := os.OpenFile(path, flag, 0644)
 	if err != nil {
