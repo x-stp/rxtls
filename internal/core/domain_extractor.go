@@ -92,6 +92,7 @@ type DomainExtractor struct {
 	// setupComplete indicates atomically whether the initial setup phase (STH fetching for all logs) has finished.
 	// This is used by the Shutdown method to decide whether to rename temporary output files.
 	setupComplete atomic.Bool
+	shutdownOnce  sync.Once
 }
 
 // DomainExtractorConfig holds configuration parameters specific to the domain extraction process.
@@ -721,84 +722,82 @@ func (de *DomainExtractor) domainExtractorCallback(item *WorkItem) error {
 // File operations (flush, close, rename) can block briefly on I/O.
 // This method is idempotent; calling it multiple times will not cause issues.
 func (de *DomainExtractor) Shutdown() {
-	// Check if already shutting down or shut down by inspecting the context.
-	if de.ctx.Err() != nil {
-		return
-	}
-	log.Println("Shutting down Domain Extractor...")
-	de.cancel() // Signal all operations using this DomainExtractor's context to stop.
+	de.shutdownOnce.Do(func() {
+		log.Println("Shutting down Domain Extractor...")
+		de.cancel() // Signal all operations using this DomainExtractor's context to stop.
 
-	if de.scheduler != nil {
-		// This will cancel worker contexts and wait for them to finish their current items.
-		de.scheduler.Shutdown()
-	}
-
-	log.Println("Flushing and closing output writers...")
-	var successCount, errorCount int
-	// Iterate over all output writers and flush/close them.
-	de.outputMap.Range(func(key, value interface{}) bool {
-		if value == nil { // Should not happen with proper map usage.
-			return true
-		}
-		lw, ok := value.(*lockedWriter)
-		if !ok || lw == nil {
-			log.Printf("Warning: Invalid type found in outputMap for key %v during shutdown", key)
-			return true
+		if de.scheduler != nil {
+			// This will cancel worker contexts and wait for them to finish their current items.
+			de.scheduler.Shutdown()
 		}
 
-		// Perform close operations under lock for each writer.
-		func() {
-			lw.mu.Lock()
-			defer lw.mu.Unlock()
-
-			var opErrors []string
-
-			// Flush the primary buffered writer.
-			if lw.writer != nil {
-				if err := lw.writer.Flush(); err != nil {
-					msg := fmt.Sprintf("Error flushing writer for %s: %v", key.(string), err)
-					log.Println(msg)
-					opErrors = append(opErrors, msg)
-				}
+		log.Println("Flushing and closing output writers...")
+		var successCount, errorCount int
+		// Iterate over all output writers and flush/close them.
+		de.outputMap.Range(func(key, value interface{}) bool {
+			if value == nil { // Should not happen with proper map usage.
+				return true
 			}
-			// Close the gzip writer if it exists (this also flushes it).
-			if lw.gzWriter != nil {
-				if err := lw.gzWriter.Close(); err != nil {
-					msg := fmt.Sprintf("Error closing gzip writer for %s: %v", key.(string), err)
-					log.Println(msg)
-					opErrors = append(opErrors, msg)
-				}
-			}
-			// Close the underlying file.
-			if lw.file != nil {
-				if err := lw.file.Close(); err != nil {
-					msg := fmt.Sprintf("Error closing file for %s: %v", key.(string), err)
-					log.Println(msg)
-					opErrors = append(opErrors, msg)
-				}
+			lw, ok := value.(*lockedWriter)
+			if !ok || lw == nil {
+				log.Printf("Warning: Invalid type found in outputMap for key %v during shutdown", key)
+				return true
 			}
 
-			// Rename the temporary file to its final name only if all ops were successful and setup was complete.
-			if len(opErrors) == 0 && de.setupComplete.Load() && lw.filePath != "" && lw.finalPath != "" {
-				if err := os.Rename(lw.filePath, lw.finalPath); err != nil {
-					log.Printf("Error renaming temp file %s to %s: %v", lw.filePath, lw.finalPath, err)
-					errorCount++
-				} else {
-					successCount++
-				}
-			} else if len(opErrors) > 0 {
-				errorCount++
-				// If there were errors, attempt to remove the temporary file to avoid leaving corrupt data.
-				if lw.filePath != "" {
-					if removeErr := os.Remove(lw.filePath); removeErr != nil {
-						log.Printf("Warning: Failed to remove temporary file %s after errors: %v", lw.filePath, removeErr)
+			// Perform close operations under lock for each writer.
+			func() {
+				lw.mu.Lock()
+				defer lw.mu.Unlock()
+
+				var opErrors []string
+
+				// Flush the primary buffered writer.
+				if lw.writer != nil {
+					if err := lw.writer.Flush(); err != nil {
+						msg := fmt.Sprintf("Error flushing writer for %s: %v", key.(string), err)
+						log.Println(msg)
+						opErrors = append(opErrors, msg)
 					}
 				}
-			}
-		}()
-		return true // Continue iterating over the map.
+				// Close the gzip writer if it exists (this also flushes it).
+				if lw.gzWriter != nil {
+					if err := lw.gzWriter.Close(); err != nil {
+						msg := fmt.Sprintf("Error closing gzip writer for %s: %v", key.(string), err)
+						log.Println(msg)
+						opErrors = append(opErrors, msg)
+					}
+				}
+				// Close the underlying file.
+				if lw.file != nil {
+					if err := lw.file.Close(); err != nil {
+						msg := fmt.Sprintf("Error closing file for %s: %v", key.(string), err)
+						log.Println(msg)
+						opErrors = append(opErrors, msg)
+					}
+				}
+
+				// Rename the temporary file to its final name only if all ops were successful and setup was complete.
+				if len(opErrors) == 0 && de.setupComplete.Load() && lw.filePath != "" && lw.finalPath != "" {
+					if err := os.Rename(lw.filePath, lw.finalPath); err != nil {
+						log.Printf("Error renaming temp file %s to %s: %v", lw.filePath, lw.finalPath, err)
+						errorCount++
+					} else {
+						successCount++
+					}
+				} else if len(opErrors) > 0 {
+					errorCount++
+					// If there were errors, attempt to remove the temporary file to avoid leaving corrupt data.
+					if lw.filePath != "" {
+						if removeErr := os.Remove(lw.filePath); removeErr != nil {
+							log.Printf("Warning: Failed to remove temporary file %s after errors: %v", lw.filePath, removeErr)
+						}
+					}
+				}
+			}()
+			return true // Continue iterating over the map.
+		})
+		log.Printf("Domain Extractor shutdown complete. Finalized %d files with %d errors.", successCount, errorCount)
 	})
-	log.Printf("Domain Extractor shutdown complete. Finalized %d files with %d errors.", successCount, errorCount)
 }
 
 // GetStats returns a pointer to the DomainExtractorStats struct, allowing callers to read current statistics.

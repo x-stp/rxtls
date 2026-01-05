@@ -297,12 +297,15 @@ func NormalizeDomain(domain string) string {
 	if domain == "" {
 		return ""
 	}
-	if len(domain) > 2 && domain[:2] == "*." {
-		domain = domain[2:] // Strip leading wildcard
-	}
+
+	// Preserve wildcard labels. We normalize case/dots but do not strip leading "*.".
+	// This keeps inputs like "*.example.com" stable, while still rejecting clearly invalid labels below.
 	parts := strings.SplitSeq(domain, ".")
 	for part := range parts {
-		if strings.HasPrefix(part, "-") || strings.HasSuffix(part, "-") || strings.HasPrefix(part, "*") {
+		if strings.HasPrefix(part, "-") || strings.HasSuffix(part, "-") {
+			return domain // Invalid label structure
+		}
+		if strings.HasPrefix(part, "*") && part != "*" {
 			return domain // Invalid label structure after potential stripping
 		}
 	}
