@@ -337,103 +337,110 @@ func (ab *AsyncBuffer) Flush() error {
 	}
 
 	// Nothing to flush
-	if ab.bufWriter.Buffered() == 0 {
+	if ab.bufWriter.Buffered() == 0 && len(ab.writeQueue) == 0 {
 		ab.mu.Unlock()
 		return nil
 	}
 
-	// Snapshot buffered bytes for metrics before flushing.
-	bufferedBytes := ab.bufWriter.Buffered()
-
-	// Mark flush in progress
+	// Mark flush in progress (while holding the lock) and make Flush synchronous.
 	ab.flushInProgress = true
-	ab.flushWg.Add(1)
-	ab.mu.Unlock()
+	defer func() {
+		ab.flushInProgress = false
+		ab.lastFlushTime = time.Now()
 
-	// Perform the flush in a separate goroutine to avoid blocking
-	go func() {
-		defer ab.flushWg.Done()
-		defer func() {
-			ab.mu.Lock()
-			ab.flushInProgress = false
-			ab.lastFlushTime = time.Now()
-			ab.mu.Unlock()
+		// Signal flush complete
+		// Drain any stale signal, then publish completion.
+		select {
+		case <-ab.flushComplete:
+		default:
+		}
+		ab.flushComplete <- struct{}{}
+		ab.mu.Unlock()
+	}()
 
-			// Signal flush complete
-			// Drain any stale signal, then publish completion.
-			select {
-			case <-ab.flushComplete:
-			default:
+	if ab.closed {
+		return ErrBufferClosed
+	}
+
+	// Drain queued writes into the buffer, flushing as needed to make progress.
+	for len(ab.writeQueue) > 0 {
+		for len(ab.writeQueue) > 0 {
+			next := ab.writeQueue[0]
+			if float64(ab.bufWriter.Buffered()+len(next))/float64(ab.bufferSize) >= ab.flushThreshold {
+				break
 			}
-			ab.flushComplete <- struct{}{}
-		}()
-
-		// Serialize access to the writer chain (bufio.Writer/gzip/file).
-		ab.mu.Lock()
-		defer ab.mu.Unlock()
-		if ab.closed {
-			return
+			n, err := ab.bufWriter.Write(next)
+			if err != nil {
+				ab.metrics.ErrorCount.Add(1)
+				ab.metrics.LastErrorTime.Store(time.Now().UnixNano())
+				break
+			}
+			ab.metrics.BytesWritten.Add(int64(n))
+			ab.metrics.WriteCount.Add(1)
+			ab.metrics.LastWriteTime.Store(time.Now().UnixNano())
+			ab.writeQueue = ab.writeQueue[1:]
 		}
 
-		// Flush the buffer
+		// Flush what we have buffered so we can continue draining.
+		bufferedBytes := ab.bufWriter.Buffered()
+		if bufferedBytes == 0 {
+			// Nothing buffered, but queue remains; avoid spinning.
+			break
+		}
 		if err := ab.bufWriter.Flush(); err != nil {
 			ab.metrics.ErrorCount.Add(1)
 			ab.metrics.LastErrorTime.Store(time.Now().UnixNano())
-			return
+			return fmt.Errorf("failed to flush buffer: %w", err)
 		}
-
-		// After flushing, opportunistically drain queued writes into the now-empty buffer.
-		// This keeps Flush() semantics intuitive: it attempts to push pending data forward.
-		if len(ab.writeQueue) > 0 {
-			processed := 0
-			for i, queuedData := range ab.writeQueue {
-				if float64(ab.bufWriter.Buffered()+len(queuedData))/float64(ab.bufferSize) >= ab.flushThreshold {
-					break
-				}
-				n, err := ab.bufWriter.Write(queuedData)
-				if err != nil {
-					ab.metrics.ErrorCount.Add(1)
-					ab.metrics.LastErrorTime.Store(time.Now().UnixNano())
-					break
-				}
-				ab.metrics.BytesWritten.Add(int64(n))
-				ab.metrics.WriteCount.Add(1)
-				ab.metrics.LastWriteTime.Store(time.Now().UnixNano())
-				processed = i + 1
-			}
-			if processed > 0 {
-				ab.writeQueue = ab.writeQueue[processed:]
-			}
-			// If queue is empty, release backpressure signal.
-			if len(ab.writeQueue) == 0 {
-				select {
-				case <-ab.backpressure:
-				default:
-				}
-			}
-		}
-
-		// If compressed, flush the gzip writer
 		if ab.compressed && ab.gzWriter != nil {
 			if err := ab.gzWriter.Flush(); err != nil {
 				ab.metrics.ErrorCount.Add(1)
 				ab.metrics.LastErrorTime.Store(time.Now().UnixNano())
-				return
+				return fmt.Errorf("failed to flush gzip writer: %w", err)
 			}
 		}
-
-		// Sync to disk
 		if err := ab.file.Sync(); err != nil {
 			ab.metrics.ErrorCount.Add(1)
 			ab.metrics.LastErrorTime.Store(time.Now().UnixNano())
-			return
+			return fmt.Errorf("failed to sync file: %w", err)
 		}
-
-		// Update metrics
 		ab.metrics.FlushCount.Add(1)
 		ab.metrics.BytesFlushed.Add(int64(bufferedBytes))
 		ab.metrics.LastFlushTime.Store(time.Now().UnixNano())
-	}()
+	}
+
+	// Final flush for any remaining buffered data.
+	if ab.bufWriter.Buffered() > 0 {
+		bufferedBytes := ab.bufWriter.Buffered()
+		if err := ab.bufWriter.Flush(); err != nil {
+			ab.metrics.ErrorCount.Add(1)
+			ab.metrics.LastErrorTime.Store(time.Now().UnixNano())
+			return fmt.Errorf("failed to flush buffer: %w", err)
+		}
+		if ab.compressed && ab.gzWriter != nil {
+			if err := ab.gzWriter.Flush(); err != nil {
+				ab.metrics.ErrorCount.Add(1)
+				ab.metrics.LastErrorTime.Store(time.Now().UnixNano())
+				return fmt.Errorf("failed to flush gzip writer: %w", err)
+			}
+		}
+		if err := ab.file.Sync(); err != nil {
+			ab.metrics.ErrorCount.Add(1)
+			ab.metrics.LastErrorTime.Store(time.Now().UnixNano())
+			return fmt.Errorf("failed to sync file: %w", err)
+		}
+		ab.metrics.FlushCount.Add(1)
+		ab.metrics.BytesFlushed.Add(int64(bufferedBytes))
+		ab.metrics.LastFlushTime.Store(time.Now().UnixNano())
+	}
+
+	// If queue is empty, release backpressure signal.
+	if len(ab.writeQueue) == 0 {
+		select {
+		case <-ab.backpressure:
+		default:
+		}
+	}
 
 	return nil
 }
