@@ -5,6 +5,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"errors"
 	"testing"
 	"time"
 )
