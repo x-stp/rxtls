@@ -383,6 +383,37 @@ func (ab *AsyncBuffer) Flush() error {
 			return
 		}
 
+		// After flushing, opportunistically drain queued writes into the now-empty buffer.
+		// This keeps Flush() semantics intuitive: it attempts to push pending data forward.
+		if len(ab.writeQueue) > 0 {
+			processed := 0
+			for i, queuedData := range ab.writeQueue {
+				if float64(ab.bufWriter.Buffered()+len(queuedData))/float64(ab.bufferSize) >= ab.flushThreshold {
+					break
+				}
+				n, err := ab.bufWriter.Write(queuedData)
+				if err != nil {
+					ab.metrics.ErrorCount.Add(1)
+					ab.metrics.LastErrorTime.Store(time.Now().UnixNano())
+					break
+				}
+				ab.metrics.BytesWritten.Add(int64(n))
+				ab.metrics.WriteCount.Add(1)
+				ab.metrics.LastWriteTime.Store(time.Now().UnixNano())
+				processed = i + 1
+			}
+			if processed > 0 {
+				ab.writeQueue = ab.writeQueue[processed:]
+			}
+			// If queue is empty, release backpressure signal.
+			if len(ab.writeQueue) == 0 {
+				select {
+				case <-ab.backpressure:
+				default:
+				}
+			}
+		}
+
 		// If compressed, flush the gzip writer
 		if ab.compressed && ab.gzWriter != nil {
 			if err := ab.gzWriter.Flush(); err != nil {

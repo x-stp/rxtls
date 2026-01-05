@@ -302,6 +302,12 @@ func GetLogInfoWithContext(ctx context.Context, ctlog *CTLogInfo) error {
 	var err error
 	maxRetries := 3
 	retryDelay := 100 * time.Millisecond
+	var retryTimer *time.Timer
+	defer func() {
+		if retryTimer != nil {
+			retryTimer.Stop()
+		}
+	}()
 
 	for attempt := range maxRetries {
 		req, reqErr := http.NewRequestWithContext(ctx, "GET", url, nil)
@@ -329,8 +335,13 @@ func GetLogInfoWithContext(ctx context.Context, ctlog *CTLogInfo) error {
 				ctlog.URL, err, attempt+1, maxRetries)
 
 			// Use context-aware sleep
+			if retryTimer == nil {
+				retryTimer = time.NewTimer(retryDelay)
+			} else {
+				retryTimer.Reset(retryDelay)
+			}
 			select {
-			case <-time.After(retryDelay):
+			case <-retryTimer.C:
 			case <-ctx.Done():
 				return ctx.Err()
 			}
@@ -382,6 +393,12 @@ func DownloadEntries(ctx context.Context, ctlog *CTLogInfo, start, end int) (*En
 	var resp *http.Response
 	maxRetries := 3
 	retryDelay := 500 * time.Millisecond
+	var retryTimer *time.Timer
+	defer func() {
+		if retryTimer != nil {
+			retryTimer.Stop()
+		}
+	}()
 
 	for attempt := range maxRetries {
 		resp, err = httpClient.Do(req)
@@ -403,8 +420,13 @@ func DownloadEntries(ctx context.Context, ctlog *CTLogInfo, start, end int) (*En
 				ctlog.URL, start, end, err, attempt+1, maxRetries)
 
 			// Use context-aware sleep
+			if retryTimer == nil {
+				retryTimer = time.NewTimer(retryDelay)
+			} else {
+				retryTimer.Reset(retryDelay)
+			}
 			select {
-			case <-time.After(retryDelay):
+			case <-retryTimer.C:
 				retryDelay *= 2 // Exponential backoff
 			case <-ctx.Done():
 				return nil, ctx.Err()
