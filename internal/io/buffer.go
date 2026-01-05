@@ -142,12 +142,9 @@ func NewAsyncBuffer(ctx context.Context, path string, options *AsyncBufferOption
 
 	// Open file with direct I/O if supported and requested
 	flag := os.O_CREATE | os.O_WRONLY | os.O_TRUNC
-	if options.AlignWrites && runtime.GOOS == "linux" {
-		// oDirect is only available on Linux
-		// Use a constant value instead of syscall.O_DIRECT to avoid build errors on other platforms
-		const oDirect = 0x4000 // Linux specific
-		flag |= oDirect
-	}
+	// NOTE: O_DIRECT is intentionally not enabled. With buffered I/O (bufio.Writer) and/or gzip.Writer,
+	// direct I/O's strict alignment requirements are not satisfied and can cause EINVAL, short writes,
+	// or severe performance regressions depending on filesystem/kernel behavior.
 
 	file, err := os.OpenFile(path, flag, 0644)
 	if err != nil {
@@ -319,13 +316,24 @@ func (ab *AsyncBuffer) Flush() error {
 		ab.mu.Unlock()
 
 		// Wait for it to complete with timeout
-		select {
-		case <-ab.flushComplete:
-			return nil
-		case <-time.After(5 * time.Second):
-			return ErrFlushTimeout
-		case <-ab.ctx.Done():
-			return ab.ctx.Err()
+		deadline := time.NewTimer(5 * time.Second)
+		defer deadline.Stop()
+		for {
+			select {
+			case <-ab.flushComplete:
+				ab.mu.Lock()
+				inProgress := ab.flushInProgress
+				ab.mu.Unlock()
+				if !inProgress {
+					return nil
+				}
+				// Stale signal; keep waiting.
+				continue
+			case <-deadline.C:
+				return ErrFlushTimeout
+			case <-ab.ctx.Done():
+				return ab.ctx.Err()
+			}
 		}
 	}
 
@@ -334,6 +342,9 @@ func (ab *AsyncBuffer) Flush() error {
 		ab.mu.Unlock()
 		return nil
 	}
+
+	// Snapshot buffered bytes for metrics before flushing.
+	bufferedBytes := ab.bufWriter.Buffered()
 
 	// Mark flush in progress
 	ab.flushInProgress = true
@@ -350,11 +361,20 @@ func (ab *AsyncBuffer) Flush() error {
 			ab.mu.Unlock()
 
 			// Signal flush complete
+			// Drain any stale signal, then publish completion.
 			select {
-			case ab.flushComplete <- struct{}{}:
+			case <-ab.flushComplete:
 			default:
 			}
+			ab.flushComplete <- struct{}{}
 		}()
+
+		// Serialize access to the writer chain (bufio.Writer/gzip/file).
+		ab.mu.Lock()
+		defer ab.mu.Unlock()
+		if ab.closed {
+			return
+		}
 
 		// Flush the buffer
 		if err := ab.bufWriter.Flush(); err != nil {
@@ -381,7 +401,7 @@ func (ab *AsyncBuffer) Flush() error {
 
 		// Update metrics
 		ab.metrics.FlushCount.Add(1)
-		ab.metrics.BytesFlushed.Add(int64(ab.bufWriter.Buffered()))
+		ab.metrics.BytesFlushed.Add(int64(bufferedBytes))
 		ab.metrics.LastFlushTime.Store(time.Now().UnixNano())
 	}()
 

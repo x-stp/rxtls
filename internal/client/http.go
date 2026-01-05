@@ -83,6 +83,8 @@ type Config struct {
 	IdleConnTimeout time.Duration
 	// MaxIdleConns controls the maximum number of idle (keep-alive) connections across all hosts.
 	MaxIdleConns int
+	// MaxIdleConnsPerHost is the maximum number of idle (keep-alive) connections to keep per host.
+	MaxIdleConnsPerHost int
 	// MaxConnsPerHost controls the maximum number of connections per host, including connections in the dialing,
 	// active, and idle states. On limit violation, dials will block.
 	MaxConnsPerHost int
@@ -100,6 +102,7 @@ func DefaultConfig() *Config {
 		KeepAliveTimeout: defaultKeepAliveTimeout,
 		IdleConnTimeout:  defaultIdleConnTimeout,
 		MaxIdleConns:     defaultMaxIdleConns,
+		MaxIdleConnsPerHost: MaxIdleConnsPerHost,
 		MaxConnsPerHost:  defaultMaxConnsPerHost,
 		RequestTimeout:   defaultRequestTimeout,
 	}
@@ -120,6 +123,14 @@ func InitHTTPClient(config *Config) {
 		config = DefaultConfig()
 	}
 
+	// If we're reinitializing an existing client, close idle connections on the old transport.
+	// This helps avoid leaking idle keep-alive connections across reconfigs.
+	if sharedClient != nil {
+		if oldTransport, ok := sharedClient.Transport.(*http.Transport); ok && oldTransport != nil {
+			oldTransport.CloseIdleConnections()
+		}
+	}
+
 	// Configure the transport with timeouts and connection pooling options.
 	// ForceAttemptHTTP2 is enabled to prefer HTTP/2 if available.
 	transport := &http.Transport{
@@ -129,8 +140,12 @@ func InitHTTPClient(config *Config) {
 			KeepAlive: config.KeepAliveTimeout, // Enables TCP keep-alives.
 		}).DialContext,
 		MaxIdleConns:        config.MaxIdleConns,
-		MaxIdleConnsPerHost: config.MaxConnsPerHost,
+		MaxIdleConnsPerHost: config.MaxIdleConnsPerHost,
+		MaxConnsPerHost:     config.MaxConnsPerHost,
 		IdleConnTimeout:     config.IdleConnTimeout,
+		TLSHandshakeTimeout: 10 * time.Second,
+		ResponseHeaderTimeout: 10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
 		DisableCompression:  false, // Enable compression (e.g., gzip) by default.
 		ForceAttemptHTTP2:   true,  // Try to use HTTP/2.
 	}

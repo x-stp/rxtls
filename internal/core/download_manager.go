@@ -335,15 +335,16 @@ func (dm *DownloadManager) processSingleLogForDownload(ctlog *certlib.CTLogInfo)
 
 	// Create a derived context for this specific log
 	logCtx, logCancel := context.WithCancel(dm.ctx)
+	setupOK := false
 	defer func() {
 		// If we exit with error, cancel any pending work for this log
-		if logCtx.Err() == nil {
+		if !setupOK {
 			logCancel()
 		}
 	}()
 
 	// Get log info with timeout
-	if err := certlib.GetLogInfo(ctlog); err != nil {
+	if err := certlib.GetLogInfoWithContext(ctxWithTimeout, ctlog); err != nil {
 		return fmt.Errorf("failed to get log info for %s: %w", ctlog.URL, err)
 	}
 
@@ -467,6 +468,8 @@ func (dm *DownloadManager) processSingleLogForDownload(ctlog *certlib.CTLogInfo)
 		}
 	}
 
+	// Setup completed successfully; keep logCtx alive for submitted work.
+	setupOK = true
 	// Report submission stats
 	if droppedBlocks > 0 {
 		log.Printf("Log %s: Submitted %d blocks, dropped %d blocks due to backpressure",

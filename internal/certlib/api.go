@@ -282,6 +282,15 @@ func processOldFormat(ctlResponse *CTLResponse) ([]CTLogInfo, error) {
 // GetLogInfo retrieves the tree size from a CT log.
 // Operation: Network bound. Allocates during HTTP fetch and JSON parsing.
 func GetLogInfo(ctlog *CTLogInfo) error {
+	return GetLogInfoWithContext(context.Background(), ctlog)
+}
+
+// GetLogInfoWithContext retrieves the tree size from a CT log using the provided context.
+// Operation: Network bound. Allocates during HTTP fetch and JSON parsing.
+func GetLogInfoWithContext(ctx context.Context, ctlog *CTLogInfo) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	// Use shared HTTP client
 	httpClient := client.GetHTTPClient()
 
@@ -295,7 +304,13 @@ func GetLogInfo(ctlog *CTLogInfo) error {
 	retryDelay := 100 * time.Millisecond
 
 	for attempt := range maxRetries {
-		resp, err = httpClient.Get(url)
+		req, reqErr := http.NewRequestWithContext(ctx, "GET", url, nil)
+		if reqErr != nil {
+			return fmt.Errorf("error creating request: %w", reqErr)
+		}
+		req.Header.Set("User-Agent", "rxtls (+https://github.com/x-stp/rxtls)")
+
+		resp, err = httpClient.Do(req)
 		if err == nil && resp.StatusCode == http.StatusOK {
 			break
 		}
@@ -304,10 +319,22 @@ func GetLogInfo(ctlog *CTLogInfo) error {
 			resp.Body.Close()
 		}
 
+		// Check if context is cancelled before retrying
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+
 		if attempt < maxRetries-1 {
 			log.Printf("Retrying GetLogInfo for %s after error: %v (attempt %d/%d)",
 				ctlog.URL, err, attempt+1, maxRetries)
-			time.Sleep(retryDelay)
+
+			// Use context-aware sleep
+			select {
+			case <-time.After(retryDelay):
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+
 			retryDelay *= 2 // Exponential backoff
 		}
 	}
