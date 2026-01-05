@@ -32,9 +32,12 @@ func TestAsyncBufferFlushDrainsQueueSynchronously(t *testing.T) {
 		t.Fatalf("Write: %v", err)
 	}
 	if _, err := ab.Write([]byte("BABABBBBBBBBBBBBBBBBBBAA")); err != nil {
-		if err != ErrBufferFull && err != nil {
-			t.Fatalf("Write (queue): %v", err)
+		if err != nil {
+			if errors.Is(err, ErrBufferFull) {
+				t.Fatalf("Write (queue): %v", err)
 		}
+
+		t.Fatalf("Write (queue): %+v", err)
 	}
 
 	ab.mu.Lock()
@@ -42,7 +45,7 @@ func TestAsyncBufferFlushDrainsQueueSynchronously(t *testing.T) {
 	ab.mu.Unlock()
 	if queued == 0 {
 		ab.mu.Lock()
-		ab.writeQueue = append(ab.writeQueue, []byte("U"))
+		ab.writeQueue = append(ab.writeQueue, []byte("Q"))
 		ab.mu.Unlock()
 	}
 
