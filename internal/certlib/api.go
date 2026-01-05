@@ -282,6 +282,15 @@ func processOldFormat(ctlResponse *CTLResponse) ([]CTLogInfo, error) {
 // GetLogInfo retrieves the tree size from a CT log.
 // Operation: Network bound. Allocates during HTTP fetch and JSON parsing.
 func GetLogInfo(ctlog *CTLogInfo) error {
+	return GetLogInfoWithContext(context.Background(), ctlog)
+}
+
+// GetLogInfoWithContext retrieves the tree size from a CT log using the provided context.
+// Operation: Network bound. Allocates during HTTP fetch and JSON parsing.
+func GetLogInfoWithContext(ctx context.Context, ctlog *CTLogInfo) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	// Use shared HTTP client
 	httpClient := client.GetHTTPClient()
 
@@ -293,9 +302,21 @@ func GetLogInfo(ctlog *CTLogInfo) error {
 	var err error
 	maxRetries := 3
 	retryDelay := 100 * time.Millisecond
+	var retryTimer *time.Timer
+	defer func() {
+		if retryTimer != nil {
+			retryTimer.Stop()
+		}
+	}()
 
 	for attempt := range maxRetries {
-		resp, err = httpClient.Get(url)
+		req, reqErr := http.NewRequestWithContext(ctx, "GET", url, nil)
+		if reqErr != nil {
+			return fmt.Errorf("error creating request: %w", reqErr)
+		}
+		req.Header.Set("User-Agent", "rxtls (+https://github.com/x-stp/rxtls)")
+
+		resp, err = httpClient.Do(req)
 		if err == nil && resp.StatusCode == http.StatusOK {
 			break
 		}
@@ -304,10 +325,27 @@ func GetLogInfo(ctlog *CTLogInfo) error {
 			resp.Body.Close()
 		}
 
+		// Check if context is cancelled before retrying
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+
 		if attempt < maxRetries-1 {
 			log.Printf("Retrying GetLogInfo for %s after error: %v (attempt %d/%d)",
 				ctlog.URL, err, attempt+1, maxRetries)
-			time.Sleep(retryDelay)
+
+			// Use context-aware sleep
+			if retryTimer == nil {
+				retryTimer = time.NewTimer(retryDelay)
+			} else {
+				retryTimer.Reset(retryDelay)
+			}
+			select {
+			case <-retryTimer.C:
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+
 			retryDelay *= 2 // Exponential backoff
 		}
 	}
@@ -355,6 +393,12 @@ func DownloadEntries(ctx context.Context, ctlog *CTLogInfo, start, end int) (*En
 	var resp *http.Response
 	maxRetries := 3
 	retryDelay := 500 * time.Millisecond
+	var retryTimer *time.Timer
+	defer func() {
+		if retryTimer != nil {
+			retryTimer.Stop()
+		}
+	}()
 
 	for attempt := range maxRetries {
 		resp, err = httpClient.Do(req)
@@ -376,8 +420,13 @@ func DownloadEntries(ctx context.Context, ctlog *CTLogInfo, start, end int) (*En
 				ctlog.URL, start, end, err, attempt+1, maxRetries)
 
 			// Use context-aware sleep
+			if retryTimer == nil {
+				retryTimer = time.NewTimer(retryDelay)
+			} else {
+				retryTimer.Reset(retryDelay)
+			}
 			select {
-			case <-time.After(retryDelay):
+			case <-retryTimer.C:
 				retryDelay *= 2 // Exponential backoff
 			case <-ctx.Done():
 				return nil, ctx.Err()

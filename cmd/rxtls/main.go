@@ -81,6 +81,9 @@ var (
 	showStats         bool
 	turbo             bool
 	compress          bool
+	downloadAll       bool
+	downloadLogURLs   []string
+	downloadLogsFile  string
 	logsFile          string // Added for fetch-logs command
 	ctURI             = flag.String("ct-uri", "", "CT log URI to process (overrides config)")
 	workers           = flag.Int("workers", runtime.NumCPU(), "Number of worker goroutines")
@@ -104,17 +107,17 @@ var rootCmd = &cobra.Command{
 var listCmd = &cobra.Command{
 	Use:   "list",
 	Short: "List all available Certificate Transparency logs",
-	Run: func(cmd *cobra.Command, args []string) {
-		listLogs()
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return listLogs()
 	},
 }
 
 var downloadCmd = &cobra.Command{
 	Use:   "download",
 	Short: "Download certificates (full B64 blob) from selected CT logs",
-	Run: func(cmd *cobra.Command, args []string) {
+	RunE: func(cmd *cobra.Command, args []string) error {
 		// Flags are parsed by Cobra and available via the variables
-		downloadLogs(outputDir, maxConcurrentLogs, bufferSize, showStats, compress, turbo)
+		return downloadLogs(outputDir, maxConcurrentLogs, bufferSize, showStats, compress, turbo)
 	},
 }
 
@@ -122,17 +125,17 @@ var domainsCmd = &cobra.Command{
 	Use:   "domains",
 	Short: "Extract domains from selected CT logs and save to CSV",
 	Long:  `Extracts domains (CN and SANs) from certificates found in selected CT logs. Output is a CSV file per log with format: offset,cn,primary_domain,all_domains_json,country,org,issuer_cn,domain_org_hash`,
-	Run: func(cmd *cobra.Command, args []string) {
+	RunE: func(cmd *cobra.Command, args []string) error {
 		// Call the new core function for domain extraction
-		extractDomains(outputDir, maxConcurrentLogs, bufferSize, showStats, turbo, compress)
+		return extractDomains(outputDir, maxConcurrentLogs, bufferSize, showStats, turbo, compress)
 	},
 }
 
 var fetchLogsCmd = &cobra.Command{
 	Use:   "fetch-logs",
 	Short: "Fetch and save the CT logs list to a local file",
-	Run: func(cmd *cobra.Command, args []string) {
-		fetchAndSaveLogs()
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return fetchAndSaveLogs()
 	},
 }
 
@@ -147,6 +150,9 @@ func init() {
 	downloadCmd.Flags().BoolVarP(&showStats, "stats", "s", true, "Show statistics during processing")
 	downloadCmd.Flags().BoolVar(&compress, "compress", false, "Compress output CSV files")
 	downloadCmd.Flags().BoolVar(&turbo, "turbo", false, "Enable high-speed mode (DNS prewarm, persistent connections)")
+	downloadCmd.Flags().BoolVar(&downloadAll, "all", false, "Download from all logs (non-interactive)")
+	downloadCmd.Flags().StringSliceVar(&downloadLogURLs, "log", nil, "CT log URL(s) to download from (repeatable, non-interactive)")
+	downloadCmd.Flags().StringVar(&downloadLogsFile, "logs-file", "", "Path to file with CT log URLs (one per line, non-interactive)")
 
 	// Flags for the domains command (sharing some with download)
 	domainsCmd.Flags().StringVarP(&outputDir, "output", "o", "output/domains", "Output directory for domain CSV files") // Default to subfolder
@@ -172,27 +178,30 @@ func main() {
 	// Initialize metrics
 	metrics.EnableMetrics()
 	if err := metrics.StartMetricsServer(fmt.Sprintf(":%d", *metricsPort)); err != nil {
-		log.Fatalf("Failed to start metrics server: %v", err)
+		log.Printf("Failed to start metrics server: %v", err)
 	}
 
 	// Only process -ct-uri directly if specified and no cobra command is used
 	if *ctURI != "" && len(os.Args) == 1 {
 		// Create output directory
 		if err := os.MkdirAll(outputDir, 0755); err != nil {
-			log.Fatalf("Failed to create output directory: %v", err)
+			log.Printf("Failed to create output directory: %v", err)
+			os.Exit(1)
 		}
 
 		// Create scheduler
 		ctx := context.Background()
 		scheduler, err := core.NewScheduler(ctx)
 		if err != nil {
-			log.Fatalf("Failed to create scheduler: %v", err)
+			log.Printf("Failed to create scheduler: %v", err)
+			os.Exit(1)
 		}
 		defer scheduler.Shutdown()
 
 		// Process CT log
 		if err := processCTLog(ctx, *ctURI, scheduler); err != nil {
-			log.Fatalf("Error processing CT log: %v", err)
+			log.Printf("Error processing CT log: %v", err)
+			os.Exit(1)
 		}
 
 		// Wait for all work to complete
@@ -296,10 +305,10 @@ func processCTLog(ctx context.Context, uri string, scheduler *core.Scheduler) er
 	return nil
 }
 
-func listLogs() {
+func listLogs() error {
 	logs, err := core.ListCTLogs()
 	if err != nil {
-		log.Fatalf("Error listing CT logs: %v", err)
+		return fmt.Errorf("error listing CT logs: %w", err)
 	}
 
 	// Display each log
@@ -313,6 +322,7 @@ func listLogs() {
 
 	// Print final count
 	fmt.Printf("Found %d Certificate Transparency Logs\n", len(logs))
+	return nil
 }
 
 func getLogState(logInfo certlib.CTLogInfo) string { // Renamed log to logInfo
@@ -329,7 +339,7 @@ func getLogState(logInfo certlib.CTLogInfo) string { // Renamed log to logInfo
 }
 
 // downloadLogs is the handler for the 'download' command.
-func downloadLogs(outputDir string, maxConcurrentLogs int, bufferSize int, showStats bool, compress bool, turbo bool) {
+func downloadLogs(outputDir string, maxConcurrentLogs int, bufferSize int, showStats bool, compress bool, turbo bool) error {
 	log.Printf("Starting certificate download: output='%s', concurrency=%d, buffer=%d, stats=%t, compress=%t, turbo=%t",
 		outputDir, maxConcurrentLogs, bufferSize, showStats, compress, turbo)
 
@@ -342,47 +352,15 @@ func downloadLogs(outputDir string, maxConcurrentLogs int, bufferSize int, showS
 	// 1. List logs for selection
 	allLogs, err := core.ListCTLogs()
 	if err != nil {
-		log.Fatalf("Error listing CT logs for selection: %v", err)
+		return fmt.Errorf("error listing CT logs for selection: %w", err)
 	}
 	if len(allLogs) == 0 {
-		log.Fatalf("No CT logs found to select from.")
+		return fmt.Errorf("no CT logs found to select from")
 	}
 
-	// 2. Display and prompt for selection
-	fmt.Println("Available Certificate Transparency Logs:")
-	for i, lg := range allLogs {
-		fmt.Printf("  [%d] %s (%s)\n", i+1, lg.Description, lg.URL)
-	}
-	fmt.Println("  [all] Download from all logs")
-	fmt.Print("Enter log number(s) to download from (e.g., 1,3,5 or all): ")
-	reader := bufio.NewReader(os.Stdin)
-	input, _ := reader.ReadString('\n')
-	input = strings.TrimSpace(input)
-	var selectedLogs []certlib.CTLogInfo
-	if strings.ToLower(input) == "all" {
-		selectedLogs = allLogs
-		fmt.Println("Selected all logs for download.")
-	} else {
-		parts := strings.Split(input, ",")
-		selectedIndices := make(map[int]bool)
-		for _, part := range parts {
-			indexStr := strings.TrimSpace(part)
-			if indexStr == "" {
-				continue
-			}
-			index, err := strconv.Atoi(indexStr)
-			if err != nil || index < 1 || index > len(allLogs) {
-				log.Fatalf("Invalid input: %q is not a valid number in the range 1-%d", indexStr, len(allLogs))
-			}
-			if !selectedIndices[index-1] {
-				selectedLogs = append(selectedLogs, allLogs[index-1])
-				selectedIndices[index-1] = true
-			}
-		}
-		if len(selectedLogs) == 0 {
-			log.Fatalf("No valid logs selected.")
-		}
-		fmt.Printf("Selected %d log(s) for download.\n", len(selectedLogs))
+	selectedLogs, err := selectLogsForDownload(allLogs)
+	if err != nil {
+		return err
 	}
 	// ----------------------------------------------
 
@@ -411,7 +389,7 @@ func downloadLogs(outputDir string, maxConcurrentLogs int, bufferSize int, showS
 	// 4. Create and Run the Download Manager
 	downloader, errManager := core.NewDownloadManager(ctx, config) // Renamed err to errManager
 	if errManager != nil {
-		log.Fatalf("Failed to create download manager: %v", errManager)
+		return fmt.Errorf("failed to create download manager: %w", errManager)
 	}
 
 	// 5. Launch Stats Display Goroutine (if enabled)
@@ -440,6 +418,109 @@ func downloadLogs(outputDir string, maxConcurrentLogs int, bufferSize int, showS
 	// 8. Display Final Stats
 	displayFinalDownloadStats(downloader)
 	log.Println("Certificate download command complete.")
+	return nil
+}
+
+func normalizeLogURL(raw string) string {
+	s := strings.TrimSpace(raw)
+	s = strings.TrimPrefix(s, "https://")
+	s = strings.TrimPrefix(s, "http://")
+	s = strings.TrimSuffix(s, "/")
+	return s
+}
+
+func selectLogsForDownload(allLogs []certlib.CTLogInfo) ([]certlib.CTLogInfo, error) {
+	byURL := make(map[string]certlib.CTLogInfo, len(allLogs))
+	for _, lg := range allLogs {
+		byURL[normalizeLogURL(lg.URL)] = lg
+	}
+
+	var requested []string
+	if downloadLogsFile != "" {
+		f, err := os.Open(downloadLogsFile)
+		if err != nil {
+			return nil, fmt.Errorf("failed to open logs file %q: %w", downloadLogsFile, err)
+		}
+		defer f.Close()
+
+		sc := bufio.NewScanner(f)
+		for sc.Scan() {
+			line := strings.TrimSpace(sc.Text())
+			if line == "" || strings.HasPrefix(line, "#") {
+				continue
+			}
+			requested = append(requested, line)
+		}
+		if err := sc.Err(); err != nil {
+			return nil, fmt.Errorf("failed reading logs file %q: %w", downloadLogsFile, err)
+		}
+	}
+	if len(downloadLogURLs) > 0 {
+		requested = append(requested, downloadLogURLs...)
+	}
+
+	if downloadAll || strings.EqualFold(strings.TrimSpace(strings.Join(requested, "")), "all") {
+		fmt.Println("Selected all logs for download.")
+		return allLogs, nil
+	}
+
+	if len(requested) > 0 {
+		selectedIndices := make(map[string]bool)
+		var selected []certlib.CTLogInfo
+		for _, raw := range requested {
+			u := normalizeLogURL(raw)
+			lg, ok := byURL[u]
+			if !ok {
+				return nil, fmt.Errorf("unknown log URL %q (normalized %q)", raw, u)
+			}
+			if !selectedIndices[u] {
+				selected = append(selected, lg)
+				selectedIndices[u] = true
+			}
+		}
+		if len(selected) == 0 {
+			return nil, fmt.Errorf("no valid logs selected")
+		}
+		fmt.Printf("Selected %d log(s) for download.\n", len(selected))
+		return selected, nil
+	}
+
+	// Interactive fallback.
+	fmt.Println("Available Certificate Transparency Logs:")
+	for i, lg := range allLogs {
+		fmt.Printf("  [%d] %s (%s)\n", i+1, lg.Description, lg.URL)
+	}
+	fmt.Println("  [all] Download from all logs")
+	fmt.Print("Enter log number(s) to download from (e.g., 1,3,5 or all): ")
+	reader := bufio.NewReader(os.Stdin)
+	input, _ := reader.ReadString('\n')
+	input = strings.TrimSpace(input)
+	if strings.ToLower(input) == "all" {
+		fmt.Println("Selected all logs for download.")
+		return allLogs, nil
+	}
+	parts := strings.Split(input, ",")
+	selectedIndices := make(map[int]bool)
+	var selectedLogs []certlib.CTLogInfo
+	for _, part := range parts {
+		indexStr := strings.TrimSpace(part)
+		if indexStr == "" {
+			continue
+		}
+		index, err := strconv.Atoi(indexStr)
+		if err != nil || index < 1 || index > len(allLogs) {
+			return nil, fmt.Errorf("invalid input: %q is not a valid number in the range 1-%d", indexStr, len(allLogs))
+		}
+		if !selectedIndices[index-1] {
+			selectedLogs = append(selectedLogs, allLogs[index-1])
+			selectedIndices[index-1] = true
+		}
+	}
+	if len(selectedLogs) == 0 {
+		return nil, fmt.Errorf("no valid logs selected")
+	}
+	fmt.Printf("Selected %d log(s) for download.\n", len(selectedLogs))
+	return selectedLogs, nil
 }
 
 // displayDownloadStats periodically shows download progress.
@@ -511,7 +592,7 @@ func displayFinalDownloadStats(downloader *core.DownloadManager) {
 }
 
 // extractDomains is the handler for the 'domains' command.
-func extractDomains(outputDir string, maxConcurrentLogs int, bufferSize int, showStats bool, turbo bool, compress bool) {
+func extractDomains(outputDir string, maxConcurrentLogs int, bufferSize int, showStats bool, turbo bool, compress bool) error {
 	log.Printf("Starting domain extraction: output='%s', concurrency=%d, buffer=%d, stats=%t, turbo=%t, compress=%t",
 		outputDir, maxConcurrentLogs, bufferSize, showStats, turbo, compress)
 
@@ -524,10 +605,10 @@ func extractDomains(outputDir string, maxConcurrentLogs int, bufferSize int, sho
 	// 1. List logs for selection (Could be made non-interactive with flags/args later)
 	allLogs, err := core.ListCTLogs()
 	if err != nil {
-		log.Fatalf("Error listing CT logs for selection: %v", err)
+		return fmt.Errorf("error listing CT logs for selection: %w", err)
 	}
 	if len(allLogs) == 0 {
-		log.Fatalf("No CT logs found to select from.")
+		return fmt.Errorf("no CT logs found to select from")
 	}
 
 	// 2. Display and prompt for selection
@@ -554,7 +635,7 @@ func extractDomains(outputDir string, maxConcurrentLogs int, bufferSize int, sho
 			}
 			index, err := strconv.Atoi(indexStr)
 			if err != nil || index < 1 || index > len(allLogs) {
-				log.Fatalf("Invalid input: %q is not a valid number in the range 1-%d", indexStr, len(allLogs))
+				return fmt.Errorf("invalid input: %q is not a valid number in the range 1-%d", indexStr, len(allLogs))
 			}
 			if !selectedIndices[index-1] {
 				selectedLogs = append(selectedLogs, allLogs[index-1])
@@ -562,7 +643,7 @@ func extractDomains(outputDir string, maxConcurrentLogs int, bufferSize int, sho
 			}
 		}
 		if len(selectedLogs) == 0 {
-			log.Fatalf("No valid logs selected.")
+			return fmt.Errorf("no valid logs selected")
 		}
 		fmt.Printf("Selected %d log(s) for domain extraction.\n", len(selectedLogs))
 	}
@@ -593,7 +674,7 @@ func extractDomains(outputDir string, maxConcurrentLogs int, bufferSize int, sho
 	// 5. Create the Domain Extractor
 	extractor, errManager := core.NewDomainExtractor(ctx, config) // Renamed err
 	if errManager != nil {
-		log.Fatalf("Failed to create domain extractor: %v", errManager)
+		return fmt.Errorf("failed to create domain extractor: %w", errManager)
 	}
 
 	// 6. Launch Stats Display Goroutine (if enabled)
@@ -627,6 +708,7 @@ func extractDomains(outputDir string, maxConcurrentLogs int, bufferSize int, sho
 	// 9. Display Final Stats
 	displayFinalDomainStats(extractor)
 	log.Println("Domain extraction command complete.")
+	return nil
 }
 
 // displayDomainStats periodically shows domain extraction progress.
@@ -707,7 +789,7 @@ func displayFinalDomainStats(extractor *core.DomainExtractor) {
 }
 
 // fetchAndSaveLogs fetches the CT logs list and saves it to a local file.
-func fetchAndSaveLogs() {
+func fetchAndSaveLogs() error {
 	log.Printf("Fetching CT logs list to %s...", logsFile)
 
 	// Temporarily disable UseLocalLogs to force fetching from remote
@@ -719,22 +801,22 @@ func fetchAndSaveLogs() {
 	httpClient := client.GetHTTPClient()
 	resp, err := httpClient.Get(certlib.CTLListsURL)
 	if err != nil {
-		log.Fatalf("Error fetching CT logs list: %v", err)
+		return fmt.Errorf("error fetching CT logs list: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		log.Fatalf("HTTP error %d fetching log list (%s)", resp.StatusCode, certlib.CTLListsURL)
+		return fmt.Errorf("HTTP error %d fetching log list (%s)", resp.StatusCode, certlib.CTLListsURL)
 	}
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		log.Fatalf("Error reading CT logs list body: %v", err)
+		return fmt.Errorf("error reading CT logs list body: %w", err)
 	}
 
 	// Save the response to the specified file
 	if err := os.WriteFile(logsFile, body, 0644); err != nil {
-		log.Fatalf("Error saving logs to file '%s': %v", logsFile, err)
+		return fmt.Errorf("error saving logs to file '%s': %w", logsFile, err)
 	}
 
 	log.Printf("Successfully saved CT logs list to %s", logsFile)
@@ -755,6 +837,7 @@ func fetchAndSaveLogs() {
 	// Restore the original certlib settings.
 	certlib.LocalLogsFile = tempOriginalLocalLogsFile
 	certlib.UseLocalLogs = oldUseLocalLogs // Restore original UseLocalLogs setting
+	return nil
 }
 
 // Helper to find min of two integers (for batching end index calculation)

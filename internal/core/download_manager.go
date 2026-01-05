@@ -75,6 +75,7 @@ type DownloadManager struct {
 	outputMap     sync.Map  // Maps log URL -> *lockedWriter
 	stringPool    sync.Pool // Reusable string builders
 	setupComplete atomic.Bool
+	shutdownOnce  sync.Once
 }
 
 // DownloadConfig holds configuration for downloading.
@@ -335,15 +336,16 @@ func (dm *DownloadManager) processSingleLogForDownload(ctlog *certlib.CTLogInfo)
 
 	// Create a derived context for this specific log
 	logCtx, logCancel := context.WithCancel(dm.ctx)
+	setupOK := false
 	defer func() {
 		// If we exit with error, cancel any pending work for this log
-		if logCtx.Err() == nil {
+		if !setupOK {
 			logCancel()
 		}
 	}()
 
 	// Get log info with timeout
-	if err := certlib.GetLogInfo(ctlog); err != nil {
+	if err := certlib.GetLogInfoWithContext(ctxWithTimeout, ctlog); err != nil {
 		return fmt.Errorf("failed to get log info for %s: %w", ctlog.URL, err)
 	}
 
@@ -467,6 +469,8 @@ func (dm *DownloadManager) processSingleLogForDownload(ctlog *certlib.CTLogInfo)
 		}
 	}
 
+	// Setup completed successfully; keep logCtx alive for submitted work.
+	setupOK = true
 	// Report submission stats
 	if droppedBlocks > 0 {
 		log.Printf("Log %s: Submitted %d blocks, dropped %d blocks due to backpressure",
@@ -647,84 +651,81 @@ func (dm *DownloadManager) downloadCallback(item *WorkItem) error {
 
 // Shutdown gracefully closes resources.
 func (dm *DownloadManager) Shutdown() {
-	if dm.ctx.Err() != nil {
-		// Already shut down
-		return
-	}
+	dm.shutdownOnce.Do(func() {
+		log.Println("Shutting down Download Manager...")
+		dm.cancel() // Cancel context
 
-	log.Println("Shutting down Download Manager...")
-	dm.cancel() // Cancel context
-
-	// Shutdown scheduler (this will wait for worker queues to empty)
-	if dm.scheduler != nil {
-		dm.scheduler.Shutdown()
-	}
-
-	log.Println("Flushing and closing download writers...")
-
-	// Close and rename all writers
-	var successCount, errorCount int
-
-	dm.outputMap.Range(func(key, value interface{}) bool {
-		if value == nil {
-			return true
+		// Shutdown scheduler (this will wait for worker queues to empty)
+		if dm.scheduler != nil {
+			dm.scheduler.Shutdown()
 		}
 
-		lw, ok := value.(*lockedWriter)
-		if !ok || lw == nil {
-			log.Printf("Warning: Invalid writer type in map during download shutdown for key %v", key)
-			return true
-		}
+		log.Println("Flushing and closing download writers...")
 
-		// Lock, flush, close and rename
-		func() {
-			lw.mu.Lock()
-			defer lw.mu.Unlock()
+		// Close and rename all writers
+		var successCount, errorCount int
 
-			closeErr := false
-
-			// Flush buffers
-			if lw.writer != nil {
-				if err := lw.writer.Flush(); err != nil {
-					log.Printf("Error flushing download writer for %s: %v", key.(string), err)
-					closeErr = true
-				}
+		dm.outputMap.Range(func(key, value interface{}) bool {
+			if value == nil {
+				return true
 			}
 
-			// Close gzip writer if present
-			if lw.gzWriter != nil {
-				if err := lw.gzWriter.Close(); err != nil {
-					log.Printf("Error closing gzip download writer for %s: %v", key.(string), err)
-					closeErr = true
-				}
+			lw, ok := value.(*lockedWriter)
+			if !ok || lw == nil {
+				log.Printf("Warning: Invalid writer type in map during download shutdown for key %v", key)
+				return true
 			}
 
-			// Close file
-			if lw.file != nil {
-				if err := lw.file.Close(); err != nil {
-					log.Printf("Error closing file for download %s: %v", key.(string), err)
-					closeErr = true
-				}
-			}
+			// Lock, flush, close and rename
+			func() {
+				lw.mu.Lock()
+				defer lw.mu.Unlock()
 
-			// Rename temp file to final name if we're fully set up
-			if dm.setupComplete.Load() && !closeErr && lw.filePath != "" && lw.finalPath != "" {
-				if err := os.Rename(lw.filePath, lw.finalPath); err != nil {
-					log.Printf("Error renaming temp file %s to %s: %v",
-						lw.filePath, lw.finalPath, err)
+				closeErr := false
+
+				// Flush buffers
+				if lw.writer != nil {
+					if err := lw.writer.Flush(); err != nil {
+						log.Printf("Error flushing download writer for %s: %v", key.(string), err)
+						closeErr = true
+					}
+				}
+
+				// Close gzip writer if present
+				if lw.gzWriter != nil {
+					if err := lw.gzWriter.Close(); err != nil {
+						log.Printf("Error closing gzip download writer for %s: %v", key.(string), err)
+						closeErr = true
+					}
+				}
+
+				// Close file
+				if lw.file != nil {
+					if err := lw.file.Close(); err != nil {
+						log.Printf("Error closing file for download %s: %v", key.(string), err)
+						closeErr = true
+					}
+				}
+
+				// Rename temp file to final name if we're fully set up
+				if dm.setupComplete.Load() && !closeErr && lw.filePath != "" && lw.finalPath != "" {
+					if err := os.Rename(lw.filePath, lw.finalPath); err != nil {
+						log.Printf("Error renaming temp file %s to %s: %v",
+							lw.filePath, lw.finalPath, err)
+						errorCount++
+					} else {
+						successCount++
+					}
+				} else if closeErr {
 					errorCount++
-				} else {
-					successCount++
 				}
-			} else if closeErr {
-				errorCount++
-			}
-		}()
-		return true
-	})
+			}()
+			return true
+		})
 
-	log.Printf("Download Manager shutdown complete. Finalized %d files with %d errors.",
-		successCount, errorCount)
+		log.Printf("Download Manager shutdown complete. Finalized %d files with %d errors.",
+			successCount, errorCount)
+	})
 }
 
 // GetStats returns the current statistics.

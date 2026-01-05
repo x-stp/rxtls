@@ -83,6 +83,8 @@ type Config struct {
 	IdleConnTimeout time.Duration
 	// MaxIdleConns controls the maximum number of idle (keep-alive) connections across all hosts.
 	MaxIdleConns int
+	// MaxIdleConnsPerHost is the maximum number of idle (keep-alive) connections to keep per host.
+	MaxIdleConnsPerHost int
 	// MaxConnsPerHost controls the maximum number of connections per host, including connections in the dialing,
 	// active, and idle states. On limit violation, dials will block.
 	MaxConnsPerHost int
@@ -100,6 +102,7 @@ func DefaultConfig() *Config {
 		KeepAliveTimeout: defaultKeepAliveTimeout,
 		IdleConnTimeout:  defaultIdleConnTimeout,
 		MaxIdleConns:     defaultMaxIdleConns,
+		MaxIdleConnsPerHost: MaxIdleConnsPerHost,
 		MaxConnsPerHost:  defaultMaxConnsPerHost,
 		RequestTimeout:   defaultRequestTimeout,
 	}
@@ -120,6 +123,39 @@ func InitHTTPClient(config *Config) {
 		config = DefaultConfig()
 	}
 
+	// Any non zero vals coming in from e.g. ConfigureFigureMode
+	// or potential libs calling this - set something; don't
+	// assume.
+	if config.DialTimeout == 0 {
+		config.DialTimeout = defaultDialTimeout
+	}
+	if config.KeepAliveTimeout == 0 {
+		config.KeepAliveTimeout = defaultKeepAliveTimeout
+	}
+	if config.IdleConnTimeout == 0 {
+		config.IdleConnTimeout = defaultIdleConnTimeout
+	}
+	if config.MaxIdleConns == 0 {
+		config.MaxIdleConns = defaultMaxIdleConns
+	}
+	if config.MaxIdleConnsPerHost == 0 {
+		config.MaxIdleConnsPerHost = MaxIdleConnsPerHost
+	}
+	if config.MaxConnsPerHost == 0 {
+		config.MaxConnsPerHost = defaultMaxConnsPerHost
+	}
+	if config.RequestTimeout == 0 {
+		config.RequestTimeout = defaultRequestTimeout
+	}
+
+	// If we're reinitializing an existing client, close idle connections on the old transport.
+	// This helps avoid leaking idle keep-alive connections across reconfigs.
+	if sharedClient != nil {
+		if oldTransport, ok := sharedClient.Transport.(*http.Transport); ok && oldTransport != nil {
+			oldTransport.CloseIdleConnections()
+		}
+	}
+
 	// Configure the transport with timeouts and connection pooling options.
 	// ForceAttemptHTTP2 is enabled to prefer HTTP/2 if available.
 	transport := &http.Transport{
@@ -129,8 +165,12 @@ func InitHTTPClient(config *Config) {
 			KeepAlive: config.KeepAliveTimeout, // Enables TCP keep-alives.
 		}).DialContext,
 		MaxIdleConns:        config.MaxIdleConns,
-		MaxIdleConnsPerHost: config.MaxConnsPerHost,
+		MaxIdleConnsPerHost: config.MaxIdleConnsPerHost,
+		MaxConnsPerHost:     config.MaxConnsPerHost,
 		IdleConnTimeout:     config.IdleConnTimeout,
+		TLSHandshakeTimeout: 10 * time.Second,
+		ResponseHeaderTimeout: 10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
 		DisableCompression:  false, // Enable compression (e.g., gzip) by default.
 		ForceAttemptHTTP2:   true,  // Try to use HTTP/2.
 	}
@@ -178,6 +218,7 @@ func ConfigureTurboMode() {
 		KeepAliveTimeout: 120 * time.Second, // Keep connections alive longer.
 		IdleConnTimeout:  120 * time.Second, // Allow idle connections to persist longer.
 		MaxIdleConns:     500,               // Larger overall idle connection pool.
+		MaxIdleConnsPerHost: 200,             // Larger per-host idle pool.
 		MaxConnsPerHost:  200,               // More connections allowed per host.
 		RequestTimeout:   30 * time.Second,  // Slightly longer request timeout for potentially slower turbo operations.
 	}
