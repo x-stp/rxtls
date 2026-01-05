@@ -123,6 +123,31 @@ func InitHTTPClient(config *Config) {
 		config = DefaultConfig()
 	}
 
+	// Any non zero vals coming in from e.g. ConfigureFigureMode
+	// or potential libs calling this - set something; don't
+	// assume.
+	if config.DialTimeout == 0 {
+		config.DialTimeout = defaultDialTimeout
+	}
+	if config.KeepAliveTimeout == 0 {
+		config.KeepAliveTimeout = defaultKeepAliveTimeout
+	}
+	if config.IdleConnTimeout == 0 {
+		config.IdleConnTimeout = defaultIdleConnTimeout
+	}
+	if config.MaxIdleConns == 0 {
+		config.MaxIdleConns = defaultMaxIdleConns
+	}
+	if config.MaxIdleConnsPerHost == 0 {
+		config.MaxIdleConnsPerHost = MaxIdleConnsPerHost
+	}
+	if config.MaxConnsPerHost == 0 {
+		config.MaxConnsPerHost = defaultMaxConnsPerHost
+	}
+	if config.RequestTimeout == 0 {
+		config.RequestTimeout = defaultRequestTimeout
+	}
+
 	// If we're reinitializing an existing client, close idle connections on the old transport.
 	// This helps avoid leaking idle keep-alive connections across reconfigs.
 	if sharedClient != nil {
@@ -193,6 +218,7 @@ func ConfigureTurboMode() {
 		KeepAliveTimeout: 120 * time.Second, // Keep connections alive longer.
 		IdleConnTimeout:  120 * time.Second, // Allow idle connections to persist longer.
 		MaxIdleConns:     500,               // Larger overall idle connection pool.
+		MaxIdleConnsPerHost: 200,             // Larger per-host idle pool.
 		MaxConnsPerHost:  200,               // More connections allowed per host.
 		RequestTimeout:   30 * time.Second,  // Slightly longer request timeout for potentially slower turbo operations.
 	}
