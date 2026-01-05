@@ -32,12 +32,10 @@ func TestAsyncBufferFlushDrainsQueueSynchronously(t *testing.T) {
 		t.Fatalf("Write: %v", err)
 	}
 	if _, err := ab.Write([]byte("BABABBBBBBBBBBBBBBBBBBAA")); err != nil {
-		if err != nil {
-			if errors.Is(err, ErrBufferFull) {
-				t.Fatalf("Write (queue): %v", err)
+		if !errors.Is(err, ErrBufferFull) {
+			t.Fatalf("Write (queue): %T: %+v", err, err)
 		}
-
-		t.Fatalf("Write (queue): %+v", err)
+		t.Fatalf("Write (queue): %v", err)
 	}
 
 	ab.mu.Lock()
