@@ -15,12 +15,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+        with:
+          persist-credentials: false
 
       - name: Set up Go
-        uses: actions/setup-go@v4
+        uses: actions/setup-go@41dfa10ca2ca416f9bf1cf0b1e92d381cdfe9d0c # v4
         with:
-          go-version: 1.22
+          go-version-file: go.mod
 
       - name: Install QEMU
         run: sudo apt-get install -y qemu-user-static
