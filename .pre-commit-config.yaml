@@ -1,0 +1,8 @@
+repos:
+  # zizmor - Security linter for GitHub Actions
+  - repo: https://github.com/zizmorcore/zizmor-pre-commit
+    # pinned to last version [ea2eb407b4cbce87cf0d502f36578950494f5ac9]
+    rev: ea2eb407b4cbce87cf0d502f36578950494f5ac9
+    hooks:
+      - id: zizmor
+        # zizmor finds security issues in GitHub Actions workflows
