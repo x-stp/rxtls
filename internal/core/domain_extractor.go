@@ -13,7 +13,7 @@ package core
 
 /*
 rxtls — fast tool in Go for working with Certificate Transparency logs
-Copyright (C) 2025  Pepijn van der Stap <rxtls@vanderstap.info>
+Copyright (C) 2026 Pepijn van der Stap <rxtls@vanderstap.info>
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published by
@@ -483,7 +483,7 @@ func (de *DomainExtractor) processSingleLogForDomains(ctlog *certlib.CTLogInfo) 
 	}
 
 	if droppedBlocks > 0 {
-		log.Printf("Log %s: Submitted %d blocks, DRGOPPED %d blocks due to backpressure.", ctlog.URL, submittedBlocks, droppedBlocks)
+		log.Printf("Log %s: Submitted %d blocks, DROPPED %d blocks due to backpressure.", ctlog.URL, submittedBlocks, droppedBlocks)
 	} else {
 		log.Printf("Successfully submitted all %d blocks for %s", submittedBlocks, ctlog.URL)
 	}
@@ -634,7 +634,7 @@ func (de *DomainExtractor) domainExtractorCallback(item *WorkItem) error {
 	// This significantly reduces string concatenation overhead and allocations.
 	sbInterface := de.stringPool.Get()
 	sb := sbInterface.(*strings.Builder) // Type assertion.
-	sb.Reset()                          // Ensure builder is clean.
+	sb.Reset()                           // Ensure builder is clean.
 	// Pre-allocate a reasonable buffer size for the string builder.
 	// Average line length can vary, estimate ~200-500 bytes per CSV line.
 	sb.Grow(len(entriesResponse.Entries) * 300) // Adjust estimate as needed.
