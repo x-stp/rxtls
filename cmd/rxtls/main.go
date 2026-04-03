@@ -839,11 +839,3 @@ func fetchAndSaveLogs() error {
 	certlib.UseLocalLogs = oldUseLocalLogs // Restore original UseLocalLogs setting
 	return nil
 }
-
-// Helper to find min of two integers (for batching end index calculation)
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
